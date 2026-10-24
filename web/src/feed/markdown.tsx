@@ -35,6 +35,76 @@ function inline(text: string, key: string): ReactNode[] {
   return out;
 }
 
+// ---------- GFM tables ----------
+type Align = 'left' | 'center' | 'right' | undefined;
+const DELIM_CELL = /^:?-+:?$/;
+
+/** Split one table row on pipes that are not escaped (\|) and not inside an inline code span. */
+function cells(line: string): string[] {
+  let t = line.trim();
+  if (t.startsWith('|')) t = t.slice(1);
+  if (t.endsWith('|') && !t.endsWith('\\|')) t = t.slice(0, -1);
+  const out: string[] = [];
+  let cur = '';
+  let code = false;
+  for (let j = 0; j < t.length; j++) {
+    const c = t[j];
+    if (c === '\\' && t[j + 1] === '|') {
+      cur += '|';
+      j++;
+    } else if (c === '`') {
+      code = !code;
+      cur += c;
+    } else if (c === '|' && !code) {
+      out.push(cur.trim());
+      cur = '';
+    } else cur += c;
+  }
+  out.push(cur.trim());
+  return out;
+}
+
+/** A table starts where a row with a pipe is followed by a delimiter row with the same number of columns. */
+function tableAt(lines: string[], i: number): Align[] | null {
+  const head = lines[i];
+  const delim = lines[i + 1];
+  if (delim === undefined || !head.includes('|') || !delim.includes('-')) return null;
+  const d = cells(delim);
+  if (!d.every((c) => DELIM_CELL.test(c)) || d.length !== cells(head).length) return null;
+  return d.map((c) => (c.startsWith(':') && c.endsWith(':') ? 'center' : c.endsWith(':') ? 'right' : c.startsWith(':') ? 'left' : undefined));
+}
+
+function Table({ head, rows, align, k }: { head: string[]; rows: string[][]; align: Align[]; k: string }) {
+  return (
+    <div className="md-table-wrap" role="region" aria-label="Table" tabIndex={0}>
+      <table className="md-table">
+        <thead>
+          <tr>
+            {head.map((c, j) => (
+              <th key={j} style={align[j] ? { textAlign: align[j] } : undefined}>
+                {inline(c, `${k}-h${j}`)}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        {rows.length > 0 && (
+          <tbody>
+            {rows.map((r, ri) => (
+              <tr key={ri}>
+                {head.map((_, j) => (
+                  <td key={j} style={align[j] ? { textAlign: align[j] } : undefined}>
+                    {inline(r[j] ?? '', `${k}-${ri}-${j}`)}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        )}
+      </table>
+    </div>
+  );
+}
+
 export function Markdown({ text }: { text: string }) {
   const lines = text.replace(/\r\n/g, '\n').split('\n');
   const blocks: ReactNode[] = [];
@@ -65,6 +135,15 @@ export function Markdown({ text }: { text: string }) {
       i++;
       continue;
     }
+    const align = tableAt(lines, i);
+    if (align) {
+      const head = cells(line);
+      const rows: string[][] = [];
+      i += 2;
+      while (i < lines.length && lines[i].trim() && lines[i].includes('|') && !/^```/.test(lines[i])) rows.push(cells(lines[i++]));
+      blocks.push(<Table key={key} k={key} head={head} rows={rows} align={align} />);
+      continue;
+    }
     const ul = /^\s*[-*]\s+/;
     const ol = /^\s*\d+[.)]\s+/;
     if (ul.test(line) || ol.test(line)) {
@@ -79,7 +158,7 @@ export function Markdown({ text }: { text: string }) {
       continue;
     }
     const para: string[] = [];
-    while (i < lines.length && lines[i].trim() && !/^```/.test(lines[i]) && !ul.test(lines[i]) && !ol.test(lines[i]) && !/^#{1,4}\s/.test(lines[i]))
+    while (i < lines.length && lines[i].trim() && !/^```/.test(lines[i]) && !ul.test(lines[i]) && !ol.test(lines[i]) && !/^#{1,4}\s/.test(lines[i]) && !tableAt(lines, i))
       para.push(lines[i++]);
     const kids: ReactNode[] = [];
     para.forEach((p, j) => {

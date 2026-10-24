@@ -4,7 +4,8 @@ import { PanelLinks } from '../boards/Handoffs';
 import { useAccounts, useNow } from '../store';
 import { ago, KIND_LABEL } from '../ui';
 
-const SAFE_URL = /^https?:\/\//i;
+// absolute http(s), or a same-origin path (file viewer); never protocol-relative (// or /\)
+const SAFE_URL = /^(https?:\/\/|\/(?![/\\]))/i;
 
 function Section({ title, children, className = '' }: { title: string; children: ReactNode; className?: string }) {
   return (
@@ -116,6 +117,15 @@ export function AcpContext({ a }: { a: AgentSummary }) {
   );
 }
 
+/** Demo mode: a masked session shows nothing it reported, so a shared screen cannot leak it. */
+export function HiddenContext() {
+  return (
+    <Section title="Details hidden">
+      <p className="ws-hint">Demo mode is on, so this session’s summary, links and folder are not loaded.</p>
+    </Section>
+  );
+}
+
 /** Context reported for an observed session. Only real data; otherwise the card's own summary. */
 export function SessionContext({ a, ctx, status, error }: { a: AgentSummary; ctx: SessionWorkspace['context']; status: 'loading' | 'ready' | 'error'; error?: string }) {
   const now = useNow();
@@ -160,7 +170,7 @@ export function SessionContext({ a, ctx, status, error }: { a: AgentSummary; ctx
         </Section>
       )}
       {links.length > 0 && (
-        <Section title="Links">
+        <Section title="Files & links">
           <ul className="ws-links">
             {links.map((l, i) => (
               <li key={`${i}-${l.url}`}>

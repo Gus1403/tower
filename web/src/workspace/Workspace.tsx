@@ -6,9 +6,9 @@ import { api, loadFeed } from '../api';
 import { ControlBar, LimitBanner, MoreMenu } from '../Panel';
 import { PanelQuestions } from '../Questions';
 import { Composer } from '../composer/Composer';
-import { getState, openAgent, toast, useStore } from '../store';
+import { demoMode, getState, openAgent, toast, useStore } from '../store';
 import { KindBadge, PermissionButtons, StatusPill } from '../ui';
-import { AcpContext, SessionContext } from './ContextAside';
+import { AcpContext, HiddenContext, SessionContext } from './ContextAside';
 import { Conversation } from './Conversation';
 import { Terminal } from './Terminal';
 import { TmuxComposer } from './TmuxComposer';
@@ -46,7 +46,11 @@ function close(id: string | null) {
   openAgent(null);
   if (!id) return;
   // give focus back to the card that was open (the board keeps its scroll position)
-  requestAnimationFrame(() => document.querySelector<HTMLElement>(`[data-card-id="${CSS.escape(id)}"] .card`)?.focus({ preventScroll: true }));
+  requestAnimationFrame(() => {
+    const host = document.querySelector<HTMLElement>(`[data-card-id="${CSS.escape(id)}"]`);
+    const target = host?.matches('button, [tabindex]') ? host : host?.querySelector<HTMLElement>('button.card, button');
+    target?.focus({ preventScroll: true });
+  });
 }
 
 function BackIcon() {
@@ -293,6 +297,16 @@ function TmuxSession({ a, nav, ctxOpen, toggleCtx }: { a: AgentSummary; nav: Wor
         )}
       </div>
       <div className="ws-pane" role="tabpanel" id={`ws-pane-${tab}`} aria-labelledby={`ws-tab-${tab}`}>
+        {tab === 'conversation' && ws.olderGone && (
+          <div className="ws-gone" role="alert">
+            <span>
+              Earlier messages could not be loaded: {ws.olderGone}
+            </span>
+            <button className="btn btn-secondary btn-sm" onClick={ws.reloadLatest}>
+              Reload latest
+            </button>
+          </div>
+        )}
         {tab === 'conversation' ? (
           <Conversation
             label={`Conversation history of ${a.name}`}
@@ -300,7 +314,7 @@ function TmuxSession({ a, nav, ctxOpen, toggleCtx }: { a: AgentSummary; nav: Wor
             loading={ws.status === 'loading'}
             notice={notice}
             empty={<p className="ws-empty">No messages recorded yet.</p>}
-            hasMore={ws.hasMore}
+            hasMore={ws.hasMore && !ws.olderGone}
             loadingOlder={ws.loadingOlder}
             olderError={ws.olderError}
             onLoadOlder={() => void ws.loadOlder()}
@@ -336,6 +350,39 @@ function TmuxSession({ a, nav, ctxOpen, toggleCtx }: { a: AgentSummary; nav: Wor
     <>
       <Header a={a} nav={nav} ctxOpen={ctxOpen} toggleCtx={toggleCtx} />
       <Layout label={a.name} ctxOpen={ctxOpen} main={main} aside={<SessionContext a={a} ctx={ws.context} status={ws.status} error={ws.error} />} />
+    </>
+  );
+}
+
+// ---------- observed tmux session, demo mode ----------
+// Names are masked on the board, so nothing behind them is fetched: no history, context, screen or send.
+function HiddenTmuxSession({ a, nav, ctxOpen, toggleCtx }: { a: AgentSummary; nav: WorkspaceNav; ctxOpen: boolean; toggleCtx: () => void }) {
+  const main = (
+    <>
+      <div className="ws-pane">
+        <div className="ws-convo-wrap">
+          <div className="ws-col">
+            <div className="ws-notice ws-hidden" role="note">
+              <h3>Details hidden in demo mode</h3>
+              <p>The conversation, terminal and context of existing sessions are not shown while demo mode is on.</p>
+              <p className="muted">Turn demo mode off in the ⋯ menu to see them.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+      <footer className="ws-foot">
+        <div className="ws-col">
+          <div className="ws-foot-note" role="note">
+            Sending is off in demo mode.
+          </div>
+        </div>
+      </footer>
+    </>
+  );
+  return (
+    <>
+      <Header a={a} nav={nav} ctxOpen={ctxOpen} toggleCtx={toggleCtx} />
+      <Layout label={a.name} ctxOpen={ctxOpen} main={main} aside={<HiddenContext />} />
     </>
   );
 }
@@ -406,6 +453,8 @@ export function Workspace(nav: WorkspaceNav) {
             )}
           </div>
         </div>
+      ) : tmux && demoMode() ? (
+        <HiddenTmuxSession key={a.id} a={a} nav={nav} ctxOpen={ctxOpen} toggleCtx={toggleCtx} />
       ) : tmux ? (
         <TmuxSession key={a.id} a={a} nav={nav} ctxOpen={ctxOpen} toggleCtx={toggleCtx} />
       ) : (

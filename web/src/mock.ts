@@ -15,6 +15,7 @@ import type {
   SessionWorkspace,
 } from '../../shared/contract';
 import type { Transport } from './api';
+import { tmuxApi } from './board/api-extra';
 import type { LaunchRequest } from '../../shared/contract';
 
 type Step =
@@ -423,7 +424,20 @@ export function mockTransport(): Transport {
       id: `t3-m${n}`,
       at: at + 60_000,
       text:
-        n === 0
+        n === 31
+          ? [
+              'Replay status by batch:',
+              '',
+              '| Batch | Events | Result | Notes |',
+              '| :--- | ---: | :---: | --- |',
+              '| 1 | 4 | **ok** | Matched the ledger on the first pass, no duplicates and no manual fix-up needed |',
+              '| 2 | 6 | ok | `customer \\| null` guard covered every guest checkout |',
+              '| 3 | 4 | *retry* | One timeout, replayed with the same idempotency key, see [Stripe log](https://dashboard.stripe.com/test/webhooks) |',
+              '| 4 | 0 | — | <script>alert(1)</script> stays text · [bad link](javascript:alert) |',
+              '',
+              'Totals match Stripe.',
+            ].join('\n')
+          : n === 0
           ? 'The failures all share one cause: the handler rejects events whose `customer` field is **null**, which Stripe sends for guest checkouts.\n\n- 14 events since 02:10\n- All `invoice.paid`\n- None reached the ledger'
           : `Checkpoint ${n}: ${n % 3 === 0 ? 'tests are green on the desk.' : n % 3 === 1 ? 'replayed one more batch; no duplicates in the ledger.' : 'reviewed the retry path, no change needed.'}`,
     });
@@ -449,14 +463,36 @@ export function mockTransport(): Transport {
         { title: 'Stripe webhook log', url: 'https://dashboard.stripe.com/test/webhooks' },
       ],
     },
-    [o2.id]: { summary: 'Cross-model review of the billing branch. One P1 folded; waiting for the next diff.' },
+    [o2.id]: {
+      summary: 'Cross-model review of the billing branch. One P1 folded; waiting for the next diff.',
+      links: [
+        { title: 'review-report.md', url: '/files/review-lane/review-report.md' },
+        { title: 'Cross-model review run', url: 'https://github.com/example/eva/actions/runs/9182' },
+      ],
+    },
     [o1.id]: { summary: 'Watching the canary deploy logs and comparing p95 with the previous release.' },
   };
   const PAGE = 30;
+  // opt-in failure modes for browser checks: localStorage tower.mock.ws = comma list of
+  // late-history (first latest polls have no history yet), stale-older (older cursor no longer resolves),
+  // send-fail (tmux sends containing [fail] are rejected)
+  const flags = new Set((localStorage.getItem('tower.mock.ws') ?? '').split(',').filter(Boolean));
+  let latePolls = flags.has('late-history') ? 2 : 0;
+  if (flags.has('send-fail')) {
+    const send = tmuxApi.send;
+    tmuxApi.send = (id, text) => (text.includes('[fail]') ? Promise.reject(new Error('The session did not accept input')) : send(id, text));
+  }
   const workspaceOf = (id: string, before?: string): SessionWorkspace | null => {
     const a = agents.get(id);
     if (!a) return null;
     const context = contexts[id] ?? {};
+    if (id === o3.id && before === undefined && latePolls > 0) {
+      latePolls--;
+      return { conversation: { available: false, reason: 'The transcript is still being indexed.', items: [], hasMore: false }, context };
+    }
+    if (id === o3.id && before !== undefined && flags.has('stale-older')) {
+      return { conversation: { available: false, reason: 'The transcript was rotated since this page was listed.', items: [], hasMore: false }, context };
+    }
     if (a.source !== 'tmux') {
       return { conversation: { available: true, items: (feeds.get(id) ?? []).map((x) => ({ ...x })), hasMore: false }, context };
     }

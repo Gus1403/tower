@@ -66,6 +66,14 @@ html.ws-lock, html.ws-lock body { overflow: hidden; }
 .ws .f-agent { font-size: 15px; line-height: 1.65; }
 .ws .f-agent .md > * + * { margin-top: 10px; }
 .ws .md-pre { font-size: 13px; }
+/* tables scroll inside the message instead of widening the page */
+.md-table-wrap { max-width: 100%; overflow-x: auto; overscroll-behavior-x: contain; border: 1px solid var(--bd); border-radius: 8px; }
+.md-table-wrap:focus-visible { outline: 2px solid var(--ac); outline-offset: 1px; }
+.md-table { border-collapse: collapse; width: max-content; min-width: 100%; font-size: 0.9em; line-height: 1.45; }
+.md-table th, .md-table td { padding: 6px 10px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--bd); }
+.md-table th { font-weight: 600; background: var(--bg3); white-space: nowrap; }
+.md-table tbody tr:last-child td { border-bottom: 0; }
+.md-table td { max-width: 28em; overflow-wrap: break-word; }
 .ws .bubble { font-size: 15px; line-height: 1.55; padding: 10px 14px; max-width: 80%; border-radius: 14px 14px 4px 14px; }
 .ws .f-thought { font-size: 13px; }
 .ws .f-tool { height: 32px; font-size: 13px; }
@@ -75,6 +83,10 @@ html.ws-lock, html.ws-lock body { overflow: hidden; }
 .ws-empty { margin: 10vh 0 0; text-align: center; color: var(--tx3); font-size: 14px; }
 .ws-older { display: flex; justify-content: center; padding: 0 0 6px; }
 .ws-older-err { font-size: 12.5px; color: var(--rd); }
+.ws-gone {
+  flex: none; display: flex; align-items: center; justify-content: center; gap: 10px; flex-wrap: wrap; width: calc(100% - 48px); max-width: 900px; margin: 10px auto 0; padding: 8px 12px; box-sizing: border-box;
+  font-size: 12.5px; color: var(--am-tx); background: var(--am-bg); border: 1px solid var(--am-bd); border-radius: 10px;
+}
 .ws-linkbtn { border: 0; background: none; padding: 0; color: var(--ac); font: inherit; text-decoration: underline; }
 .ws-jump {
   position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%); height: 30px; padding: 0 14px; border-radius: 999px;
@@ -121,6 +133,7 @@ html.ws-lock, html.ws-lock body { overflow: hidden; }
 .ws .c-tools .c-icon { height: 32px; width: 32px; }
 .ws .c-tools .ctrl { margin: 0 0 0 2px; gap: 4px 10px; }
 .ws .c-tools .ctx { margin-left: 4px; }
+.ws .c-tools .spacer { display: block; flex: 1; }
 .ws .c-hint { font-size: 11.5px; color: var(--tx3); white-space: nowrap; margin-right: 6px; }
 .ws .c-send { width: auto; height: 32px; padding: 0 16px; border-radius: 9px; font-size: 13px; }
 .ws .queue, .ws .att-row { padding: 0 2px 8px; }
@@ -208,4 +221,5 @@ html.ws-lock, html.ws-lock body { overflow: hidden; }
   .ws .tmux-composer .tmux-input { font-size: 15px; }
   .ws .ws-dock .panel-perm { flex-direction: column; align-items: stretch; }
   .ws-notice { margin-top: 4vh; padding: 20px 16px; }
+  .ws-gone { width: calc(100% - 20px); margin-top: 8px; }
 }

@@ -22,7 +22,8 @@ const trusted = (id: string) => {
   }
 };
 
-type Pending = { kind: 'send'; text: string } | { kind: 'key'; key: TmuxKey };
+// draft: the composer text exactly as it was when Send was pressed (text is what goes out, trimmed)
+type Pending = { kind: 'send'; text: string; draft: string } | { kind: 'key'; key: TmuxKey };
 
 /**
  * Types into a live tmux session. Every send and key goes through the existing guard (confirm unless the owner
@@ -66,13 +67,14 @@ export function TmuxComposer({ a, showKeys, onSent }: { a: AgentSummary; showKey
     try {
       if (p.kind === 'send') {
         await tmuxApi.send(a.id, p.text);
-        if (getDraft(a.id) === p.text) setDraft(a.id, '');
-        if (mounted.current) setText((cur) => (cur === p.text ? '' : cur));
+        // clear only if nothing was typed since Send; newer text stays
+        if (getDraft(a.id) === p.draft) setDraft(a.id, '');
+        if (mounted.current) setText((cur) => (cur === p.draft ? '' : cur));
       } else await tmuxApi.key(a.id, p.key);
       if (mounted.current) onSent();
     } catch (e) {
       const msg = (e as Error).message || 'Request failed';
-      if (p.kind === 'send') restoreDraft(a.id, p.text);
+      if (p.kind === 'send') restoreDraft(a.id, p.draft);
       if (mounted.current) setError(p.kind === 'send' ? `Not sent: ${msg}` : `Could not send ${p.key}: ${msg}`);
       else toast(`Could not send to ${a.name}: ${msg}`);
     } finally {
@@ -93,7 +95,7 @@ export function TmuxComposer({ a, showKeys, onSent }: { a: AgentSummary; showKey
   const send = () => {
     const t = text.trim();
     if (!t || sending) return;
-    request({ kind: 'send', text: t });
+    request({ kind: 'send', text: t, draft: text });
   };
 
   const accept = () => {

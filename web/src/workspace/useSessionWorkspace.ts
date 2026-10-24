@@ -17,6 +17,7 @@ export interface SessionWorkspaceState {
   hasMore: boolean;
   loadingOlder: boolean;
   olderError?: string;
+  olderGone?: string; // the older-page cursor no longer resolves; only reloading the latest messages recovers
   context: SessionWorkspace['context'];
   updatedAt?: number;
 }
@@ -44,6 +45,8 @@ export function useSessionWorkspace(id: string) {
   const inflight = useRef(false);
   const olderInflight = useRef(false);
   const cursor = useRef<{ set: boolean; before?: string }>({ set: false });
+  const replace = useRef(false);
+  const epoch = useRef(0); // bumped by reloadLatest so an older page still in flight cannot land on the new history
   const timer = useRef<ReturnType<typeof setTimeout>>();
 
   const poll = useCallback(async () => {
@@ -55,9 +58,11 @@ export function useSessionWorkspace(id: string) {
       const w = await api.workspace(id);
       if (!alive.current) return;
       const conv = w.conversation;
-      // the older-page cursor comes from the first page only; later polls just refresh the newest window
-      const firstPage = !cursor.current.set;
+      // the older-page cursor comes from the first available page only; later polls just refresh the newest window
+      const firstPage = conv.available && !cursor.current.set;
       if (firstPage) cursor.current = { set: true, before: conv.hasMore ? conv.before : undefined };
+      const fresh = firstPage && replace.current;
+      if (fresh) replace.current = false;
       setSt((s) => ({
         ...s,
         status: 'ready',
@@ -65,8 +70,9 @@ export function useSessionWorkspace(id: string) {
         stale: false,
         available: conv.available,
         reason: conv.reason,
-        items: conv.available ? mergeLatest(s.items, conv.items ?? []) : s.items,
+        items: conv.available ? mergeLatest(fresh ? [] : s.items, conv.items ?? []) : s.items,
         hasMore: firstPage ? !!cursor.current.before : s.hasMore,
+        ...(fresh ? { olderGone: undefined, olderError: undefined } : {}),
         context: w.context ?? {},
         updatedAt: Date.now(),
       }));
@@ -103,11 +109,23 @@ export function useSessionWorkspace(id: string) {
     const before = cursor.current.before;
     if (olderInflight.current || !before) return;
     olderInflight.current = true;
+    const at = epoch.current;
     setSt((s) => ({ ...s, loadingOlder: true, olderError: undefined }));
     try {
       const w = await api.workspace(id, before);
       if (!alive.current) return;
+      if (at !== epoch.current) {
+        setSt((s) => ({ ...s, loadingOlder: false }));
+        return;
+      }
       const conv = w.conversation;
+      if (!conv.available) {
+        // the page behind this cursor is gone (rotated or rewritten transcript): say so instead of ending history here
+        cursor.current = { set: true };
+        const why = conv.reason || 'Earlier messages are no longer available.';
+        setSt((s) => ({ ...s, loadingOlder: false, hasMore: false, olderGone: why }));
+        return;
+      }
       cursor.current = { set: true, before: conv.hasMore ? conv.before : undefined };
       setSt((s) => {
         const have = new Set(s.items.map((x) => x.id));
@@ -115,7 +133,8 @@ export function useSessionWorkspace(id: string) {
         return { ...s, items: [...older, ...s.items], hasMore: !!cursor.current.before, loadingOlder: false };
       });
     } catch (e) {
-      if (alive.current) setSt((s) => ({ ...s, loadingOlder: false, olderError: (e as Error).message || 'Request failed' }));
+      const msg = (e as Error).message || 'Request failed';
+      if (alive.current) setSt((s) => ({ ...s, loadingOlder: false, olderError: at === epoch.current ? msg : s.olderError }));
     } finally {
       olderInflight.current = false;
     }
@@ -126,5 +145,14 @@ export function useSessionWorkspace(id: string) {
     void poll();
   }, [poll]);
 
-  return { ...st, loadOlder, refresh: poll, retry };
+  /** Drop the paged-in history and start again from the newest page with a fresh cursor. */
+  const reloadLatest = useCallback(() => {
+    epoch.current++;
+    cursor.current = { set: false };
+    replace.current = true;
+    setSt((s) => ({ ...s, hasMore: false, olderError: undefined }));
+    void poll();
+  }, [poll]);
+
+  return { ...st, loadOlder, refresh: poll, retry, reloadLatest };
 }
