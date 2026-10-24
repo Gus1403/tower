@@ -2,6 +2,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { AgentManager } from './agents.js';
 import { createServer } from './http.js';
+import { createAccounts } from './accounts.js';
+import { createStore } from './store.js';
 
 const token = process.env.TOWER_TOKEN;
 if (!token) {
@@ -19,8 +21,14 @@ const stuckMs = Number(process.env.TOWER_STUCK_MS || 300000);
 process.on('unhandledRejection', (err) => console.error('[tower] unhandledRejection:', err));
 process.on('uncaughtException', (err) => console.error('[tower] uncaughtException:', err));
 
-const manager = new AgentManager({ workDir, stuckMs });
+const accounts = createAccounts();
+const store = createStore();
+const manager = new AgentManager({ workDir, stuckMs, accounts, store });
 const server = createServer(manager, token);
+accounts.start(
+  (list) => server.broadcastAccounts(list),
+  (accountId) => manager.countRunning(accountId),
+);
 
 server.listen(port, host, () => {
   console.log(`[tower] listening on http://${host}:${port} (work dir ${workDir})`);
@@ -29,7 +37,10 @@ server.listen(port, host, () => {
 const shutdown = async () => {
   console.log('[tower] shutting down, stopping agents');
   manager.shutdown();
+  accounts.stop();
+  manager.saveNow();
   await manager.stopAll();
+  manager.saveNow();
   server.close();
   process.exit(0);
 };

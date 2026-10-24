@@ -16,12 +16,69 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const agent: acp.Agent = {
   async initialize() {
-    return { protocolVersion: acp.PROTOCOL_VERSION, agentCapabilities: {} };
+    return { protocolVersion: acp.PROTOCOL_VERSION, agentCapabilities: { loadSession: true } };
   },
   async newSession() {
     const sessionId = `sess-${Math.random().toString(36).slice(2)}`;
     sessions.set(sessionId, { cancelled: false });
-    return { sessionId };
+    return {
+      sessionId,
+      modes: {
+        currentModeId: 'default',
+        availableModes: [
+          { id: 'default', name: 'Default' },
+          { id: 'plan', name: 'Plan' },
+        ],
+      },
+      configOptions: [
+        {
+          type: 'select' as const,
+          id: 'model',
+          name: 'Model',
+          currentValue: 'm1',
+          options: [
+            { value: 'm1', name: 'Model One' },
+            { value: 'm2', name: 'Model Two' },
+          ],
+        },
+      ],
+    };
+  },
+  async loadSession(params) {
+    sessions.set(params.sessionId, { cancelled: false });
+    await conn
+      .sessionUpdate({
+        sessionId: params.sessionId,
+        update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'REPLAYED' } },
+      })
+      .catch(() => {});
+    return { modes: { currentModeId: 'loaded', availableModes: [{ id: 'loaded', name: 'Loaded' }] } };
+  },
+  async setSessionMode(params) {
+    await conn
+      .sessionUpdate({
+        sessionId: params.sessionId,
+        update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `mode:${params.modeId}` } },
+      })
+      .catch(() => {});
+    return {};
+  },
+  async setSessionConfigOption(params) {
+    const value = String((params as { value: unknown }).value);
+    return {
+      configOptions: [
+        {
+          type: 'select' as const,
+          id: 'model',
+          name: 'Model',
+          currentValue: `${value}`,
+          options: [
+            { value: 'm1', name: 'Model One' },
+            { value: 'm2', name: 'Model Two' },
+          ],
+        },
+      ],
+    };
   },
   async authenticate() {
     return {};
@@ -44,6 +101,19 @@ const agent: acp.Agent = {
     }
     const upd = (update: acp.SessionUpdate) =>
       conn.sessionUpdate({ sessionId, update }).catch(() => {});
+    if (mode === 'slow') {
+      sess.cancelled = false;
+      const text = params.prompt.map((b) => (b.type === 'text' ? b.text : '')).join('');
+      await upd({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `echo:${text}` } });
+      await upd({ sessionUpdate: 'usage_update', used: 1234, size: 200000 });
+      await upd({ sessionUpdate: 'tool_call', toolCallId: `t-${text}`, title: 'Run ls', kind: 'execute', status: 'in_progress' });
+      await upd({ sessionUpdate: 'tool_call_update', toolCallId: `t-${text}`, status: 'completed', rawOutput: { stdout: 'file-a\nfile-b' } });
+      for (let i = 0; i < 16; i++) {
+        if (sess.cancelled) return { stopReason: 'cancelled' };
+        await sleep(50);
+      }
+      return { stopReason: 'end_turn' };
+    }
     await upd({
       sessionUpdate: 'agent_message_chunk',
       content: { type: 'text', text: 'Working on it. ' },

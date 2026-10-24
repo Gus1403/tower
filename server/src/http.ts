@@ -7,7 +7,7 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
 import type { AgentManager } from './agents.js';
-import type { LaunchRequest, ServerEvent } from '../../shared/contract.js';
+import type { Account, LaunchRequest, ServerEvent } from '../../shared/contract.js';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const WEB_DIST = path.join(REPO_ROOT, 'web', 'dist');
@@ -52,6 +52,8 @@ export function createServer(manager: AgentManager, token: string) {
   manager.on('agent', (agent) => send({ type: 'agent', agent }));
   manager.on('feed', (agentId, item) => send({ type: 'feed', agentId, item }));
   manager.on('capacity', (capacity) => send({ type: 'capacity', capacity }));
+  manager.on('agent_removed', (agentId) => send({ type: 'agent_removed', agentId }));
+  const broadcastAccounts = (accounts: Account[]) => send({ type: 'accounts', accounts });
 
   const authed = (req: http.IncomingMessage): boolean => {
     const url = new URL(req.url ?? '/', 'http://localhost');
@@ -122,6 +124,7 @@ export function createServer(manager: AgentManager, token: string) {
       const state = () => manager.state(os.hostname());
 
       if (req.method === 'GET' && p === '/api/state') return json(res, 200, state());
+      if (req.method === 'GET' && p === '/api/accounts') return json(res, 200, manager.listAccounts());
 
       const feedMatch = p.match(/^\/api\/agents\/([^/]+)\/feed$/);
       if (req.method === 'GET' && feedMatch) {
@@ -145,16 +148,43 @@ export function createServer(manager: AgentManager, token: string) {
         if (body.model != null && (typeof body.model !== 'string' || !/^[A-Za-z0-9._:-]{1,64}$/.test(body.model))) {
           return json(res, 400, { error: 'model must match /^[A-Za-z0-9._:-]{1,64}$/' });
         }
-        const agent = await manager.launch({
-          kind: body.kind as LaunchRequest['kind'],
-          task: body.task,
-          name: body.name,
-          model: body.model,
-        });
+        if (body.accountId != null && typeof body.accountId !== 'string') {
+          return json(res, 400, { error: 'accountId must be a string' });
+        }
+        let agent;
+        try {
+          agent = await manager.launch({
+            kind: body.kind as LaunchRequest['kind'],
+            task: body.task,
+            name: body.name,
+            model: body.model,
+            accountId: body.accountId === 'auto' ? undefined : body.accountId,
+          });
+        } catch (err) {
+          if (err instanceof Error && err.message === 'unknown account') {
+            return json(res, 400, { error: 'unknown account' });
+          }
+          throw err;
+        }
         return json(res, 201, agent);
       }
 
-      const actMatch = p.match(/^\/api\/agents\/([^/]+)\/(prompt|permission|stop)$/);
+      const queueMatch = p.match(/^\/api\/agents\/([^/]+)\/queue\/(\d+)$/);
+      if (req.method === 'DELETE' && queueMatch) {
+        const r = manager.removeQueued(queueMatch[1], Number(queueMatch[2]));
+        if (r === 'notfound') return json(res, 404, { error: 'no such queued prompt' });
+        return json(res, 200, { ok: true });
+      }
+
+      const delMatch = p.match(/^\/api\/agents\/([^/]+)$/);
+      if (req.method === 'DELETE' && delMatch) {
+        if (manager.isObserved(delMatch[1])) return json(res, 409, { error: 'observed tmux agents are read-only' });
+        const ok = await manager.remove(delMatch[1]);
+        if (!ok) return json(res, 404, { error: 'no such agent' });
+        return json(res, 200, { ok: true });
+      }
+
+      const actMatch = p.match(/^\/api\/agents\/([^/]+)\/(prompt|permission|stop|interrupt|mode|config|resume)$/);
       if (req.method === 'POST' && actMatch) {
         const [, id, action] = actMatch;
         if (manager.isObserved(id)) {
@@ -162,12 +192,39 @@ export function createServer(manager: AgentManager, token: string) {
         }
         if (!manager.getAgent(id)) return json(res, 404, { error: 'no such agent' });
         if (action === 'prompt') {
-          const body = (await readBody(req)) as { text?: unknown };
+          const body = (await readBody(req)) as { text?: unknown; interrupt?: unknown };
           if (typeof body.text !== 'string' || !body.text.trim()) {
             return json(res, 400, { error: 'text is required' });
           }
-          const r = manager.prompt(id, body.text);
-          if (r === 'conflict') return json(res, 409, { error: 'agent is busy' });
+          const r = manager.prompt(id, body.text, body.interrupt === true);
+          if (r.result === 'conflict') return json(res, 409, { error: 'agent is not running' });
+          return json(res, 202, { queued: !!r.queued });
+        }
+        if (action === 'interrupt') {
+          const r = manager.interrupt(id);
+          if (r === 'conflict') return json(res, 409, { error: 'no turn running' });
+          return json(res, 200, { ok: true });
+        }
+        if (action === 'mode' || action === 'config') {
+          const body = (await readBody(req)) as { modeId?: unknown; configId?: unknown; value?: unknown };
+          let r;
+          if (action === 'mode') {
+            if (typeof body.modeId !== 'string') return json(res, 400, { error: 'modeId is required' });
+            r = await manager.setMode(id, body.modeId);
+          } else {
+            if (typeof body.configId !== 'string' || typeof body.value !== 'string') {
+              return json(res, 400, { error: 'configId and value are required' });
+            }
+            r = await manager.setConfig(id, body.configId, body.value);
+          }
+          if (r === 'invalid') return json(res, 400, { error: `unknown ${action}` });
+          if (r === 'conflict') return json(res, 409, { error: 'agent is not running' });
+          return json(res, 200, { ok: true });
+        }
+        if (action === 'resume') {
+          const r = await manager.resume(id);
+          if (r === 'conflict') return json(res, 409, { error: 'agent is not resumable' });
+          if (r === 'unknown_account') return json(res, 400, { error: 'unknown account' });
           return json(res, 202, { ok: true });
         }
         if (action === 'permission') {
@@ -211,5 +268,5 @@ export function createServer(manager: AgentManager, token: string) {
     wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
   });
 
-  return server;
+  return Object.assign(server, { broadcastAccounts });
 }
