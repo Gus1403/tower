@@ -80,7 +80,7 @@ try {
   await page.waitForSelector('.topbar .cap', { timeout: 15000 });
   await page.waitForTimeout(2000);
   ok(await page.locator('.reconnect').isHidden(), 'WS connected (no reconnecting pill)');
-  ok((await page.locator('.cap:not(.cap-off)').count()) === 3, 'three capacity chips show available');
+  ok((await page.locator('.cap:not(.cap-off):not(.cap-all)').count()) === 3, 'three capacity chips show available');
   ok(await page.locator('.observed-toggle').isVisible(), 'Observed (tmux) section present');
   ok(await page.locator('.observed-grid').isHidden(), 'Observed section collapsed by default');
   const boardText = await page.locator('.observed-toggle').innerText();
@@ -213,13 +213,14 @@ try {
     ok(n('devin') === 1, `1 devin account (${n('devin')})`);
     ok(acc.every((x) => !/@/.test(`${x.id} ${x.label} ${x.detail ?? ''}`)), 'no emails in account ids/labels/details');
     ok(acc.some((x) => x.kind === 'claude' && x.loggedIn === true), 'a claude account is loggedIn');
-    await wp.locator('.caps button.cap').first().click();
+    await wp.locator('.caps button.cap-all').click();
     await wp.waitForSelector('.acc-line', { timeout: 5000 });
-    ok((await wp.locator('.acc-line').count()) >= 10, `Accounts panel lists ${await wp.locator('.acc-line').count()} rows`);
+    const rows = await wp.locator('.acc-line').count();
     await shot(wp, 'livea-accounts');
     await wp.keyboard.press('Escape');
-    await wp.waitForTimeout(300);
-    if (await wp.locator('.acc-line').count()) await wp.mouse.click(5, 450);
+    await wp.waitForTimeout(400);
+    if (await wp.locator('.acc-line').count()) await wp.locator('.acc-scrim').click({ position: { x: 5, y: 450 } }).catch(() => {});
+    ok(rows >= 20, `Accounts panel lists all accounts (${rows} rows)`);
     await shot(wp, 'livea-topbar');
   });
 
