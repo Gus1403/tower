@@ -1,5 +1,6 @@
 // Wave D (boards, send/handoff/agents over the agent socket) + review-fix regressions, at the HTTP / socket boundary.
 import { test } from 'node:test';
+import net from 'node:net';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, statSync } from 'node:fs';
@@ -379,5 +380,70 @@ test('review fix: rotation changes reach WS clients from server start, before an
   } finally {
     rot.close();
     await h.close();
+  }
+});
+
+// Identity is a public integration contract: display titles are NOT tmux session names.
+// This HTTP test protects board placement/name/work against the previous slug guess;
+// existing tmux tests only supply discovery output, with no Forja metadata source.
+test('fleet uses exact Forja session identity, full work and semantic board state; redaction and fallback', async () => {
+  const socketPath = path.join(mkdtempSync('/tmp/tower-forja-'), 'agent.sock');
+  const previous = { socket: process.env.FORJA_AGENT_SOCKET, redact: process.env.TOWER_TMUX_REDACT };
+  const work = 'A full work description that must survive beyond the sixty characters the human-readable CLI prints.';
+  let response: unknown = { ok: true, state: {
+    boards: [
+      { id: 'routine-board', name: 'Rutinas', routines: true, groups: ['you', 'working', 'rest'] },
+      { id: 'customer-board', name: 'Clientes', customers: true, groups: ['you', 'working', 'rest'] },
+    ],
+    cards: [
+      { session: 'shell-123', title: 'SEO diario', board: 'routine-board', column: 0, work },
+      { session: 'cust-opaque-id', title: 'Customer with a different title', board: 'customer-board', column: 1, work: 'Running a task' },
+      { session: 'shell-between-turns', title: 'Known session at a shell', board: 'routine-board', column: 2, agent: 'claude' },
+      { session: 'not-running', title: 'Sleeping customer', board: 'customer-board', column: 2 },
+    ],
+  }};
+  const server = net.createServer(socket => socket.once('data', data => {
+    assert.equal(JSON.parse(String(data)).cmd, 'board');
+    socket.end(JSON.stringify(response) + '\n');
+  }));
+  await new Promise<void>(resolve => server.listen(socketPath, resolve));
+  process.env.FORJA_AGENT_SOCKET = socketPath;
+  process.env.TOWER_TMUX_REDACT = '0';
+  const h = await inProc();
+  const discovery = 'shell-123\t%1\tclaude\t1\t100\tclaude\ncust-opaque-id\t%2\tcodex\t2\t100\tcodex\nshell-between-turns\t%3\tzsh\t3\t100\t-\nunrelated-shell\t%4\tzsh\t4\t100\t-\n';
+  try {
+    await h.manager.pollTmuxWith(discovery);
+    let state = await h.get<StateResponse>('/api/state');
+    const routine = state.agents.find(a => a.kind === 'claude')!;
+    const customer = state.agents.find(a => a.kind === 'codex')!;
+    assert.equal(state.agents.length, 3, 'include known live shells, not absent processes or unrelated shells');
+    assert.equal(state.agents.find(a => a.name === 'Known session at a shell')?.board, 'routines');
+    assert.equal(routine.name, 'SEO diario');
+    assert.equal(routine.board, 'routines');
+    assert.equal(routine.status, 'needs_you');
+    assert.equal(routine.task, work);
+    assert.equal(customer.name, 'Customer with a different title');
+    assert.equal(customer.board, 'customers');
+    assert.equal(customer.status, 'working');
+    process.env.TOWER_TMUX_REDACT = '1';
+    await h.manager.pollTmuxWith(discovery);
+    state = await h.get<StateResponse>('/api/state');
+    assert.ok(state.agents.every(a => a.task === 'Existing tmux session'));
+    assert.ok(!JSON.stringify(state.agents).includes('SEO diario'));
+    process.env.TOWER_TMUX_REDACT = '0';
+    response = { ok: true, state: { cards: null } };
+    await h.manager.pollTmuxWith(discovery);
+    state = await h.get<StateResponse>('/api/state');
+    assert.equal(state.agents.length, 2);
+    assert.ok(state.agents.every(a => a.status === 'observed'));
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await h.manager.pollTmuxWith(discovery);
+    assert.equal((await h.get<StateResponse>('/api/state')).agents.length, 2);
+  } finally {
+    await h.close();
+    if (server.listening) await new Promise<void>(resolve => server.close(() => resolve()));
+    for (const [key, value] of [['FORJA_AGENT_SOCKET', previous.socket], ['TOWER_TMUX_REDACT', previous.redact]]) {
+      if (value === undefined) delete process.env[key!]; else process.env[key!] = value;
+    }
   }
 });

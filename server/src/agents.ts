@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import net from 'node:net';
 import { spawn, spawnSync, execFile, type ChildProcess } from 'node:child_process';
 import { Readable, Writable } from 'node:stream';
 import { randomBytes, createHash } from 'node:crypto';
@@ -1356,33 +1357,34 @@ export class AgentManager extends EventEmitter {
       return;
     }
     const redact = process.env.TOWER_TMUX_REDACT !== '0';
-    const bySession = new Map<string, { kind: AgentKind; activity: number }>();
+    const bySession = new Map<string, { kind?: AgentKind; activity: number }>();
     for (const line of out.split('\n')) {
       if (!line.trim()) continue;
       const [sess, , , , act, agent] = line.split('\t');
-      if (!sess || agent === '-' || !agent) continue;
-      const kind = agent as AgentKind;
-      if (!KIND_LABEL[kind]) continue;
+      if (!sess) continue;
+      const kind = KIND_LABEL[agent as AgentKind] ? agent as AgentKind : undefined;
       const activity = (Number(act) || 0) * 1000;
       const cur = bySession.get(sess);
-      if (!cur || activity > cur.activity) bySession.set(sess, { kind, activity });
+      if (!cur || (kind && !cur.kind) || (activity > cur.activity && (!!kind || !cur.kind))) bySession.set(sess, { kind, activity });
     }
     const fleet = await this.readForjaBoard(new Set(bySession.keys()));
     const seen = new Set<string>();
     const changed: AgentSummary[] = [];
     for (const [sess, info] of bySession) {
+      const f = fleet.get(sess);
+      const kind = info.kind ?? f?.kind;
+      if (!kind) continue;
       const id = `tmux-${createHash('sha1').update(sess).digest('hex').slice(0, 6)}`;
       seen.add(id);
       if (redact && !this.tmuxNums.has(sess)) {
         this.tmuxNums.set(sess, this.tmuxNextN);
         this.tmuxNextN += 1;
       }
-      const label = KIND_LABEL[info.kind];
-      const f = fleet.get(sess);
+      const label = KIND_LABEL[kind];
       const board = f?.board ?? (sess.startsWith('cust-') ? 'customers' : sess.startsWith('rutina-') ? 'routines' : 'programs');
       const summary: AgentSummary = {
         id,
-        kind: info.kind,
+        kind,
         name: redact ? `${label} session ${this.tmuxNums.get(sess)}` : (f?.name ?? sess),
         task: redact ? 'Existing tmux session' : f?.work || f?.name || sess,
         cwd: '',
@@ -1411,29 +1413,50 @@ export class AgentManager extends EventEmitter {
     for (const s of changed) this.emit('agent', s);
   }
 
-  // Read-only view of the owner's Forja board (if installed): session -> board, real state, one-line work.
-  // Forja rows are "group\tstate\tname\t\twork\ttouches"; programs use the tmux session name, customer rows use a
-  // display name whose slug matches cust-<slug>. Anything unmatched keeps the plain tmux card.
-  private async readForjaBoard(sessions: Set<string>): Promise<Map<string, { board: string; status: AgentStatus; name: string; work: string }>> {
-    const out = new Map<string, { board: string; status: AgentStatus; name: string; work: string }>();
-    const bin = process.env.TOWER_FORJA_BIN ?? path.join(os.homedir(), '.agents', 'bin', 'forja');
-    if (process.env.TOWER_FORJA === '0' || !existsSync(bin)) return out;
-    let text = '';
+  // Read the same structured board response as the Forja CLI. Its printed TSV drops
+  // session identity and truncates work; display-title slugs cannot identify sessions.
+  private async readForjaBoard(sessions: Set<string>): Promise<Map<string, { board: string; status: AgentStatus; name: string; work: string; kind?: AgentKind }>> {
+    const out = new Map<string, { board: string; status: AgentStatus; name: string; work: string; kind?: AgentKind }>();
+    if (process.env.TOWER_FORJA === '0') return out;
+    const socketPath = process.env.FORJA_AGENT_SOCKET ?? path.join(os.homedir(), '.local', 'state', 'forja', 'agent.sock');
+    type BoardView = { id: string; customers?: boolean; routines?: boolean; groups: string[] };
+    type CardView = { session?: string; title?: string; board: string; column: number; work?: string; agent?: string };
     try {
-      text = await this.run(bin, ['board'], 8000);
+      const response = await new Promise<string>((resolve, reject) => {
+        const socket = net.createConnection(socketPath);
+        const chunks: Buffer[] = [];
+        let bytes = 0;
+        const deadline = setTimeout(() => socket.destroy(new Error('Forja board timeout')), 8000);
+        socket.on('connect', () => socket.write(JSON.stringify({ cmd: 'board' }) + '\n'));
+        socket.on('data', (chunk: Buffer) => {
+          bytes += chunk.length;
+          if (bytes > 8 * 1024 * 1024) socket.destroy(new Error('Forja board too large'));
+          else chunks.push(chunk);
+        });
+        socket.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+        socket.on('error', reject);
+        socket.on('close', () => clearTimeout(deadline));
+      });
+      const data = JSON.parse(response) as { ok?: boolean; state?: { boards?: BoardView[]; cards?: CardView[] } };
+      if (!data.ok || !Array.isArray(data.state?.boards) || !Array.isArray(data.state?.cards)) return out;
+      const boards = new Map(data.state.boards.filter(b => b && typeof b.id === 'string').map(b => [b.id, b]));
+      const statuses: Record<string, AgentStatus> = { you: 'needs_you', working: 'working', rest: 'done', archived: 'stopped' };
+      for (const card of data.state.cards) {
+        if (!card || typeof card.session !== 'string' || !sessions.has(card.session)) continue;
+        const source = boards.get(card.board);
+        if (!source || !Array.isArray(source.groups)) continue;
+        const status = statuses[source.groups[card.column] ?? ''];
+        if (!status) continue;
+        out.set(card.session, {
+          board: source.routines ? 'routines' : source.customers ? 'customers' : 'programs',
+          status,
+          kind: KIND_LABEL[card.agent as AgentKind] ? card.agent as AgentKind : undefined,
+          name: typeof card.title === 'string' && card.title.trim() ? card.title : card.session,
+          work: typeof card.work === 'string' ? card.work.trim() : '',
+        });
+      }
     } catch {
-      return out;
-    }
-    const BOARD: Record<string, string> = { Programas: 'programs', 'Clientes y leads': 'customers', Rutinas: 'routines' };
-    const STATE: Record<string, AgentStatus> = { 'Para ti': 'needs_you', Trabajando: 'working', 'En reposo': 'done' };
-    for (const line of text.split('\n')) {
-      const [group, state, name, , work] = line.split('\t');
-      const board = BOARD[group ?? ''];
-      if (!board || !name || !(state in STATE)) continue;
-      const slug = slugify(name);
-      const sess = sessions.has(name) ? name : sessions.has(`cust-${slug}`) ? `cust-${slug}` : sessions.has(`rutina-${slug}`) ? `rutina-${slug}` : undefined;
-      if (!sess || out.has(sess)) continue;
-      out.set(sess, { board, status: STATE[state], name, work: (work ?? '').trim() });
+      // Forja is optional. Discovery and terminal access still work if it is unavailable.
     }
     return out;
   }
