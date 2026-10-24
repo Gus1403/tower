@@ -73,6 +73,17 @@ export interface AgentSummary {
   limitHit?: boolean; // the last error/stop looked like a usage limit (429, quota, "limit") -> offer "Continue on another account"
   interactive?: boolean; // tmux cards only: true when TOWER_TMUX_INTERACTIVE=1 (send/key/screen allowed)
   movedFrom?: { agentId: string; accountId?: string }; // Wave C: set on the agent created by move / auto-rotate
+  // ---- Wave D (boards + sessions talking to each other) ----
+  board?: string; // Board.id; default 'programs'
+  customer?: string; // e.g. "cust-acme": the customer this session is dedicated to (customers board)
+  requestedBy?: { agentId: string; name: string }; // set on a session opened by `tower handoff`
+  handoffs?: { agentId: string; name: string; status: AgentStatus }[]; // sessions this one opened (kept current)
+}
+
+export interface Board {
+  id: string; // url-safe, e.g. "programs", "customers"
+  name: string; // "Programs", "Customers"
+  columns: { id: string; name: string; statuses: AgentStatus[] }[]; // which statuses land in each column
 }
 
 export interface Question {
@@ -171,6 +182,7 @@ export interface StateResponse {
   accounts: Account[];
   notes: Note[];
   rotation?: RotationState; // Wave C
+  boards: Board[]; // Wave D: always includes programs + customers
   host: string; // os.hostname()
 }
 
@@ -211,6 +223,20 @@ export interface StateResponse {
 // POST /api/accounts/:id/exclude          body { excluded: boolean } -> 200 (activity 'excluded' / 'included')
 // POST /api/rotation                      body { autoRotate: boolean } -> 200 RotationState
 // WS { type: 'rotation'; rotation: RotationState } on every change; accounts changes still go out as 'accounts'.
+// ---- Wave D (boards + sessions talking to each other) ----
+// Default boards: programs { Working: starting|working|stuck, Needs you: needs_you, Done: done|stopped|error } and
+//      customers { Handling: starting|working|needs_you|stuck, Waiting on the customer: done, Asleep: stopped|error }.
+// POST /api/boards { name, columns? } -> 201 Board (columns default to the programs set) · DELETE /api/boards/:id (empty only)
+// POST /api/agents/:id/board { board, customer? } -> 200 (moves a card between boards)
+// Agent CLI over the same unix socket:
+//   `tower send --to <agent id or exact name> "text"` -> delivered to that agent as a prompt (queued if busy):
+//      "[From <sender name>] <text>"; feed status line on both sides. Unknown target -> error listing live agents.
+//   `tower handoff [--kind devin|claude|codex] [--board programs] "task"` -> launches a new agent with
+//      requestedBy = sender (same account choice: Automatic); the sender's summary.handoffs lists it; when the new
+//      agent's turn ends with end_turn, the server delivers "[Handoff result from <name>] <its last agent message,
+//      ≤4000 chars>" to the requester as a prompt.
+//   `tower agents` -> lists live agents (id, name, board, customer, status) for the sender to address.
+// WS boards changes: { type: 'boards'; boards: Board[] }
 // POST /api/agents/:id/permission         body { requestId: string; optionId: string } -> 200 (404 if no such pending request)
 //      ACP reply is nested: { outcome: { outcome: 'selected', optionId } }
 // POST /api/agents/:id/stop               -> 200: (a) answer any pending permission { outcome: { outcome: 'cancelled' } },
@@ -235,6 +261,8 @@ export interface LaunchRequest {
   name?: string; // default: first 4 words of task
   model?: string; // passed to the agent when supported (devin: --model)
   accountId?: string; // Account.id; omitted or 'auto' = the logged-in account of that kind with the lowest usedPct
+  board?: string; // Wave D
+  customer?: string; // Wave D
 }
 
 // ---- WebSocket: GET /api/ws?token=... (server -> client only) ----
@@ -246,4 +274,5 @@ export type ServerEvent =
   | { type: 'accounts'; accounts: Account[] }
   | { type: 'agent_removed'; agentId: string }
   | { type: 'notes'; notes: Note[] }
-  | { type: 'rotation'; rotation: RotationState };
+  | { type: 'rotation'; rotation: RotationState }
+  | { type: 'boards'; boards: Board[] };
