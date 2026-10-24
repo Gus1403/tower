@@ -9,6 +9,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as acp from '@agentclientprotocol/sdk';
 import type {
+  Board,
   ConfigOption,
   AgentKind,
   AgentStatus,
@@ -24,11 +25,44 @@ import type {
   PlanEntry,
 } from '../../shared/contract.js';
 import type { AccountsPort, PersistedAgent, StorePort } from './ports.js';
-import { getUpload } from './uploads.js';
+import { deleteUpload, getUpload } from './uploads.js';
+import { tmuxAllowed } from './tmux-control.js';
 
 export function towerDataDir(): string {
   return process.env.TOWER_DATA_DIR || path.join(os.homedir(), '.local', 'state', 'tower');
 }
+
+export const MAX_TASK_CHARS = 8000;
+export const CUSTOMER_RE = /^[A-Za-z0-9._ -]{1,64}$/;
+export const DEFAULT_BOARDS: Board[] = [
+  {
+    id: 'programs',
+    name: 'Programs',
+    columns: [
+      { id: 'working', name: 'Working', statuses: ['starting', 'working', 'stuck'] },
+      { id: 'needs-you', name: 'Needs you', statuses: ['needs_you'] },
+      { id: 'done', name: 'Done', statuses: ['done', 'stopped', 'error'] },
+    ],
+  },
+  {
+    id: 'customers',
+    name: 'Customers',
+    columns: [
+      { id: 'handling', name: 'Handling', statuses: ['starting', 'working', 'needs_you', 'stuck'] },
+      { id: 'waiting', name: 'Waiting on the customer', statuses: ['done'] },
+      { id: 'asleep', name: 'Asleep', statuses: ['stopped', 'error'] },
+    ],
+  },
+];
+const ALL_STATUSES: AgentStatus[] = ['starting', 'working', 'needs_you', 'stuck', 'done', 'error', 'stopped', 'observed'];
+export function slugify(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48);
+}
+type SockResult<T = object> = ({ ok: true } & T) | { ok: false; error: string };
 const LIMIT_RE = /usage limit|rate limit|429|quota|limit reached|hit your limit|you(?:'|’)ve (?:hit|reached) your [^\n]{0,60}?limit|usage_limit_reached/i;
 
 // Wave C: injected by rotation.ts (createRotation(...).attach(manager)); optional so the manager works without it.
@@ -177,6 +211,7 @@ export interface AgentManagerEvents {
   feed: (agentId: string, item: FeedItem) => void;
   capacity: (c: Capacity[]) => void;
   notes: (n: Note[]) => void;
+  boards: (b: Board[]) => void;
 }
 
 export declare interface AgentManager {
@@ -205,6 +240,9 @@ export class AgentManager extends EventEmitter {
   private saveTimer?: NodeJS.Timeout;
   private notes: Note[] = [];
   private notesFile?: string;
+  private notesStarting = new Set<string>();
+  private customBoards: Board[] = [];
+  private boardsFile?: string;
   rotation?: RotationHooks; // Wave C
 
   constructor(opts: {
@@ -213,6 +251,7 @@ export class AgentManager extends EventEmitter {
     accounts?: AccountsPort;
     store?: StorePort;
     notesFile?: string;
+    boardsFile?: string;
   }) {
     super();
     this.workDir = opts.workDir;
@@ -220,7 +259,9 @@ export class AgentManager extends EventEmitter {
     this.accounts = opts.accounts;
     this.store = opts.store;
     this.notesFile = opts.notesFile;
+    this.boardsFile = opts.boardsFile;
     this.loadNotes();
+    this.loadBoards();
     mkdirSync(this.workDir, { recursive: true });
     if (this.store) {
       for (const p of this.store.load()) {
@@ -233,6 +274,7 @@ export class AgentManager extends EventEmitter {
             pendingPermission: undefined,
             queued: s.queued ?? [],
             resumable: !!p.sessionId,
+            board: s.board ?? 'programs',
           },
           cwd: s.cwd,
           sessionId: p.sessionId,
@@ -304,6 +346,44 @@ export class AgentManager extends EventEmitter {
     e.summary = { ...e.summary, status: s, ...extra };
     this.emit('agent', e.summary);
     this.broadcastCapacity();
+    this.syncHandoff(e);
+  }
+
+  // keeps requester.summary.handoffs[].status current
+  private syncHandoff(e: AgentEntry) {
+    const rb = e.summary.requestedBy;
+    if (!rb) return;
+    const r = this.agents.get(rb.agentId);
+    if (!r || r.dead || !r.summary.handoffs) return;
+    const i = r.summary.handoffs.findIndex((h) => h.agentId === e.summary.id);
+    if (i < 0) return;
+    const cur = r.summary.handoffs[i];
+    if (cur.status === e.summary.status && cur.name === e.summary.name) return;
+    r.summary.handoffs = r.summary.handoffs.map((h, j) =>
+      j === i ? { ...h, status: e.summary.status, name: e.summary.name } : h,
+    );
+    this.emitAgent(r);
+  }
+
+  // on end_turn of a handoff agent: deliver its last message to the requester (once per turn end)
+  private deliverHandoffResult(e: AgentEntry) {
+    const rb = e.summary.requestedBy;
+    if (!rb) return;
+    const r = this.agents.get(rb.agentId);
+    if (!r || r.dead) return;
+    const msgId = e.lastMsgId.agent_message;
+    const item = msgId ? e.feed.find((f) => f.id === msgId) : undefined;
+    let text = item && item.type === 'agent_message' ? item.text : (e.summary.lastMessage ?? '');
+    text = text.trim();
+    if (!text) text = '(no message)';
+    if (text.length > 4000) text = text.slice(0, 4000);
+    const res = this.prompt(r.summary.id, `[Handoff result from ${e.summary.name}] ${text}`);
+    this.pushFeed(e, {
+      type: 'status',
+      id: this.nid('st'),
+      at: Date.now(),
+      text: res.result === 'ok' ? `Result sent to ${r.summary.name}` : `Could not deliver result to ${r.summary.name} (not running)`,
+    });
   }
 
   private pushFeed(e: AgentEntry, item: FeedItem) {
@@ -339,7 +419,10 @@ export class AgentManager extends EventEmitter {
     return [path.join(REPO_ROOT, 'node_modules', '.bin', bin)];
   }
 
-  async launch(req: LaunchRequest): Promise<AgentSummary> {
+  async launch(req: LaunchRequest, extra?: Partial<AgentSummary>): Promise<AgentSummary> {
+    const board = req.board ?? 'programs';
+    if (!this.hasBoard(board)) throw new Error('unknown board');
+    if (req.task.length > MAX_TASK_CHARS) req = { ...req, task: req.task.slice(0, MAX_TASK_CHARS) };
     let extraEnv: Record<string, string> = {};
     if (this.accounts) {
       let le;
@@ -370,6 +453,9 @@ export class AgentManager extends EventEmitter {
         toolCalls: 0,
         queued: [],
         accountId: req.accountId,
+        board,
+        customer: req.customer,
+        ...extra,
       },
       cwd,
       feed: [],
@@ -701,7 +787,8 @@ export class AgentManager extends EventEmitter {
         this.pushFeed(e, { type: feedType, id, at: Date.now(), text } as FeedItem);
       }
       if (feedType === 'agent_message') {
-        e.summary.lastMessage = oneLine(text, 280);
+        const full = e.feed.find((f) => f.id === e.lastMsgId.agent_message) as { text?: string } | undefined;
+        e.summary.lastMessage = oneLine(full?.text ?? text, 280);
         this.emitAgent(e);
       }
       newMessageBoundary();
@@ -879,6 +966,7 @@ export class AgentManager extends EventEmitter {
         at: Date.now(),
         text: `Turn ended: ${res.stopReason}`,
       });
+      if (res.stopReason === 'end_turn') this.deliverHandoffResult(e);
       this.drain(e);
     } catch (err) {
       if (!mine()) return;
@@ -926,6 +1014,7 @@ export class AgentManager extends EventEmitter {
       copyFileSync(u!.path, path.join(dir, name));
       lines.push(`Attached: attachments/${name}`);
     }
+    for (const u of ups) deleteUpload(u!.id); // bytes now live in the agent cwd only
     return lines;
   }
 
@@ -1238,11 +1327,11 @@ export class AgentManager extends EventEmitter {
   private async pollTmuxInner(): Promise<void> {
     let out: string;
     try {
-      out = await this.run('bash', [TMUX_LIST]);
+      out = this.tmuxProbe ? await this.tmuxProbe() : await this.run('bash', [TMUX_LIST]);
     } catch {
-      if (this.tmuxAgents.size) {
-        this.tmuxAgents.clear();
-      }
+      const gone = [...this.tmuxAgents.keys()];
+      this.tmuxAgents.clear();
+      for (const id of gone) this.emit('agent_removed', id);
       return;
     }
     const redact = process.env.TOWER_TMUX_REDACT !== '0';
@@ -1279,7 +1368,7 @@ export class AgentManager extends EventEmitter {
         lastActivityAt: info.activity || Date.now(),
         toolCalls: 0,
         queued: [],
-        interactive: process.env.TOWER_TMUX_INTERACTIVE === '1',
+        interactive: tmuxAllowed(sess),
       };
       const prev = this.tmuxAgents.get(id);
       const prevJson = prev ? JSON.stringify(prev.summary) : '';
@@ -1291,10 +1380,25 @@ export class AgentManager extends EventEmitter {
     for (const id of [...this.tmuxAgents.keys()]) {
       if (!seen.has(id)) {
         this.tmuxAgents.delete(id);
+        this.emit('agent_removed', id);
       }
     }
     for (const s of changed) this.emit('agent', s);
   }
+
+  // test seam: run one tmux poll with an injected probe output (null = probe failed)
+  async pollTmuxWith(out: string | null): Promise<void> {
+    this.tmuxProbe = async () => {
+      if (out === null) throw new Error('probe failed');
+      return out;
+    };
+    try {
+      await this.pollTmuxInner();
+    } finally {
+      this.tmuxProbe = undefined;
+    }
+  }
+  private tmuxProbe?: () => Promise<string>;
 
   private broadcastCapacity() {
     const c = this.capacityList();
@@ -1329,6 +1433,7 @@ export class AgentManager extends EventEmitter {
       capacity: this.capacityList(),
       accounts: this.listAccounts(),
       notes: this.listNotes(),
+      boards: this.listBoards(),
       host,
       rotation: this.rotation?.state(),
     };
@@ -1360,6 +1465,8 @@ export class AgentManager extends EventEmitter {
     const e = this.agents.get(agentId);
     const q = e?.summary.questions?.find((x) => x.id === questionId);
     if (!e || !q) return 'notfound';
+    const st0 = e.summary.status;
+    if (st0 === 'stopped' || st0 === 'error' || st0 === 'observed') return 'conflict'; // keep the question
     e.summary.questions = e.summary.questions!.filter((x) => x.id !== questionId);
     if (e.summary.status === 'needs_you' && !e.pendingQueue.length && !e.summary.questions.length) {
       this.setStatus(e, e.turnRunning ? 'working' : 'done');
@@ -1397,7 +1504,10 @@ export class AgentManager extends EventEmitter {
     }
     let convo = lines.slice(-40).join('\n');
     if (convo.length > 12000) convo = convo.slice(convo.length - 12000);
-    const task = `Continue this task on a fresh session. Original task: ${e.summary.task}\n\nConversation so far (most recent last):\n${convo}`;
+    const head = `Continue this task on a fresh session. Original task: ${oneLine(e.summary.task, 2000)}\n\nConversation so far (most recent last):\n`;
+    const room = MAX_TASK_CHARS - head.length;
+    if (convo.length > room) convo = convo.slice(convo.length - Math.max(0, room));
+    const task = (head + convo).slice(0, MAX_TASK_CHARS);
     let agent: AgentSummary;
     try {
       agent = await this.launch({
@@ -1406,6 +1516,8 @@ export class AgentManager extends EventEmitter {
         name: `${e.summary.name} (moved)`,
         model: e.summary.model,
         accountId,
+        board: this.hasBoard(e.summary.board ?? 'programs') ? e.summary.board : undefined,
+        customer: e.summary.customer,
       });
     } catch {
       return { ok: false, error: 'unknown_account' };
@@ -1479,14 +1591,195 @@ export class AgentManager extends EventEmitter {
     return true;
   }
 
-  // throws Error('unknown account') like launch
+  // throws Error('unknown account') like launch; Error('note archived') when archived or already starting (409)
   async startNote(id: string, kind: AgentKind, accountId?: string): Promise<AgentSummary | undefined> {
     const n = this.notes.find((x) => x.id === id);
     if (!n) return undefined;
-    const task = n.body.trim() ? `${n.title}\n\n${n.body}` : n.title;
-    const agent = await this.launch({ kind, task, name: n.title.trim() || undefined, accountId });
-    this.updateNote(id, { archived: true });
-    return agent;
+    if (n.archived || this.notesStarting.has(id)) throw new Error('note archived');
+    this.notesStarting.add(id);
+    try {
+      const task = n.body.trim() ? `${n.title}\n\n${n.body}` : n.title;
+      const agent = await this.launch({ kind, task, name: n.title.trim() || undefined, accountId });
+      this.updateNote(id, { archived: true });
+      return agent;
+    } finally {
+      this.notesStarting.delete(id);
+    }
+  }
+
+  // ---- Wave D: boards ----
+  listBoards(): Board[] {
+    return [...DEFAULT_BOARDS, ...this.customBoards];
+  }
+
+  hasBoard(id: string): boolean {
+    return this.listBoards().some((b) => b.id === id);
+  }
+
+  private loadBoards() {
+    const f = this.boardsFile;
+    if (!f) return;
+    try {
+      const data = JSON.parse(readFileSync(f, 'utf8'));
+      if (Array.isArray(data)) {
+        this.customBoards = data.filter(
+          (b) =>
+            b &&
+            typeof b.id === 'string' &&
+            typeof b.name === 'string' &&
+            Array.isArray(b.columns) &&
+            !DEFAULT_BOARDS.some((d) => d.id === b.id),
+        );
+      }
+    } catch {
+      /* no custom boards yet */
+    }
+  }
+
+  private boardsChanged() {
+    const f = this.boardsFile;
+    if (f) {
+      try {
+        mkdirSync(path.dirname(f), { recursive: true, mode: 0o700 });
+        const tmp = `${f}.${process.pid}.${Date.now()}.tmp`;
+        writeFileSync(tmp, JSON.stringify(this.customBoards), { mode: 0o600 });
+        chmodSync(tmp, 0o600);
+        renameSync(tmp, f);
+      } catch (err) {
+        console.error(`[tower] boards save failed: ${err}`);
+      }
+    }
+    this.emit('boards', this.listBoards());
+  }
+
+  createBoard(name: string, columns?: unknown): { ok: true; board: Board } | { ok: false; error: 'invalid' | 'duplicate'; message: string } {
+    const nm = name.trim().slice(0, 64);
+    const id = slugify(nm);
+    if (!id) return { ok: false, error: 'invalid', message: 'name must contain letters or digits' };
+    if (this.hasBoard(id)) return { ok: false, error: 'duplicate', message: `board "${id}" already exists` };
+    let cols: Board['columns'];
+    if (columns == null) {
+      cols = DEFAULT_BOARDS[0].columns.map((c) => ({ ...c, statuses: [...c.statuses] }));
+    } else {
+      if (!Array.isArray(columns) || !columns.length || columns.length > 12) {
+        return { ok: false, error: 'invalid', message: 'columns must be a non-empty array (max 12)' };
+      }
+      cols = [];
+      for (const c of columns as Array<Record<string, unknown>>) {
+        if (!c || typeof c.name !== 'string' || !c.name.trim() || !Array.isArray(c.statuses)) {
+          return { ok: false, error: 'invalid', message: 'each column needs name and statuses[]' };
+        }
+        if (!c.statuses.every((s) => ALL_STATUSES.includes(s as AgentStatus))) {
+          return { ok: false, error: 'invalid', message: 'unknown status in columns' };
+        }
+        const cid = (typeof c.id === 'string' && slugify(c.id)) || slugify(c.name) || `col-${cols.length + 1}`;
+        if (cols.some((x) => x.id === cid)) return { ok: false, error: 'invalid', message: 'duplicate column id' };
+        cols.push({ id: cid, name: c.name.trim().slice(0, 64), statuses: [...new Set(c.statuses as AgentStatus[])] });
+      }
+    }
+    const board: Board = { id, name: nm, columns: cols };
+    this.customBoards = [...this.customBoards, board];
+    this.boardsChanged();
+    return { ok: true, board };
+  }
+
+  deleteBoard(id: string): 'ok' | 'notfound' | 'default' | 'not_empty' {
+    if (DEFAULT_BOARDS.some((b) => b.id === id)) return 'default';
+    if (!this.customBoards.some((b) => b.id === id)) return 'notfound';
+    if ([...this.agents.values()].some((e) => !e.dead && e.summary.board === id)) return 'not_empty';
+    this.customBoards = this.customBoards.filter((b) => b.id !== id);
+    this.boardsChanged();
+    return 'ok';
+  }
+
+  setBoard(agentId: string, board: string, customer?: string | null): 'ok' | 'notfound' | 'unknown_board' {
+    const e = this.agents.get(agentId);
+    if (!e) return 'notfound';
+    if (!this.hasBoard(board)) return 'unknown_board';
+    const next: Partial<AgentSummary> = { board };
+    if (customer !== undefined) next.customer = customer || undefined;
+    e.summary = { ...e.summary, ...next };
+    this.emitAgent(e);
+    return 'ok';
+  }
+
+  // ---- Wave D: sessions talking to each other (agent socket) ----
+  private liveTowerAgents(): AgentEntry[] {
+    return [...this.agents.values()].filter(
+      (e) => !e.dead && !e.summary.archived && e.summary.status !== 'stopped' && e.summary.status !== 'error',
+    );
+  }
+
+  listLiveAgents(): { id: string; name: string; board: string; customer?: string; status: AgentStatus; kind: AgentKind }[] {
+    return this.liveTowerAgents().map((e) => ({
+      id: e.summary.id,
+      name: e.summary.name,
+      board: e.summary.board ?? 'programs',
+      customer: e.summary.customer,
+      status: e.summary.status,
+      kind: e.summary.kind,
+    }));
+  }
+
+  agentsFor(fromId: string): SockResult<{ agents: ReturnType<AgentManager['listLiveAgents']> }> {
+    if (!this.agents.has(fromId)) return { ok: false, error: 'unknown sender (TOWER_AGENT_ID)' };
+    return { ok: true, agents: this.listLiveAgents() };
+  }
+
+  private liveListText(): string {
+    const l = this.listLiveAgents();
+    return l.length ? l.map((a) => `${a.id} (${a.name})`).join(', ') : '(none)';
+  }
+
+  sendMessage(fromId: string, to: string, text: string): SockResult<{ agentId: string; queued: boolean }> {
+    const from = this.agents.get(fromId);
+    if (!from || from.dead) return { ok: false, error: 'unknown sender (TOWER_AGENT_ID)' };
+    let target = this.agents.get(to);
+    if (target && (target.dead || target.summary.archived)) target = undefined;
+    if (!target) {
+      const byName = this.liveTowerAgents().filter((e) => e.summary.name === to);
+      if (byName.length > 1) {
+        return { ok: false, error: `name "${to}" is ambiguous; use an id. Live agents: ${this.liveListText()}` };
+      }
+      target = byName[0];
+    }
+    if (!target) return { ok: false, error: `unknown agent "${to}". Live agents: ${this.liveListText()}` };
+    if (target === from) return { ok: false, error: 'cannot send a message to yourself' };
+    const r = this.prompt(target.summary.id, `[From ${from.summary.name}] ${text}`);
+    if (r.result !== 'ok') {
+      return { ok: false, error: `agent ${target.summary.id} (${target.summary.name}) is not running. Live agents: ${this.liveListText()}` };
+    }
+    this.pushFeed(from, { type: 'status', id: this.nid('st'), at: Date.now(), text: `Sent to ${target.summary.name}: ${oneLine(text, 200)}` });
+    this.pushFeed(target, { type: 'status', id: this.nid('st'), at: Date.now(), text: `Message from ${from.summary.name}` });
+    return { ok: true, agentId: target.summary.id, queued: !!r.queued };
+  }
+
+  async handoff(
+    fromId: string,
+    opts: { task: string; kind?: AgentKind; board?: string },
+  ): Promise<SockResult<{ agentId: string; name: string }>> {
+    const from = this.agents.get(fromId);
+    if (!from || from.dead) return { ok: false, error: 'unknown sender (TOWER_AGENT_ID)' };
+    const board = opts.board ?? 'programs';
+    if (!this.hasBoard(board)) {
+      return { ok: false, error: `unknown board "${board}". Boards: ${this.listBoards().map((b) => b.id).join(', ')}` };
+    }
+    let agent: AgentSummary;
+    try {
+      agent = await this.launch(
+        { kind: opts.kind ?? from.summary.kind, task: opts.task, board, accountId: undefined },
+        { requestedBy: { agentId: from.summary.id, name: from.summary.name } },
+      );
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : 'launch failed' };
+    }
+    const ne = this.agents.get(agent.id);
+    const status = ne?.summary.status ?? agent.status;
+    from.summary.handoffs = [...(from.summary.handoffs ?? []), { agentId: agent.id, name: agent.name, status }];
+    this.pushFeed(from, { type: 'status', id: this.nid('st'), at: Date.now(), text: `Handed off to ${agent.name} (${agent.id})` });
+    this.emitAgent(from);
+    if (ne) this.syncHandoff(ne);
+    return { ok: true, agentId: agent.id, name: agent.name };
   }
 
   shutdown() {

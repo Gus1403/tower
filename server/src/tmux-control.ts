@@ -24,6 +24,22 @@ function tmux(args: string[], stdin?: string): Promise<string> {
   });
 }
 
+/** Interactive control only when TOWER_TMUX_INTERACTIVE=1 AND the session name matches a glob in
+ *  TOWER_TMUX_ALLOW (comma-separated, `*` and `?` wildcards; empty/unset = no session). */
+export function tmuxAllowed(session: string): boolean {
+  if (process.env.TOWER_TMUX_INTERACTIVE !== '1') return false;
+  const globs = (process.env.TOWER_TMUX_ALLOW ?? '')
+    .split(',')
+    .map((g) => g.trim())
+    .filter(Boolean);
+  return globs.some((g) => {
+    const re = new RegExp(
+      '^' + g.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.') + '$',
+    );
+    return re.test(session);
+  });
+}
+
 /** `=<session>:` exact-match target for a session name (keeps an already formatted target). */
 export function formatTarget(session: string): string {
   if (session.startsWith('=')) return session;

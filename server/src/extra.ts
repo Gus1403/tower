@@ -5,7 +5,7 @@ import type { ServerEvent } from '../../shared/contract.js';
 import type { AgentManager } from './agents.js';
 import { saveUpload } from './uploads.js';
 import type { Rotation } from './rotation.js';
-import { ALLOWED_KEYS, MAX_SEND_CHARS, formatTarget, tmuxKey, tmuxScreen, tmuxSend } from './tmux-control.js';
+import { ALLOWED_KEYS, MAX_SEND_CHARS, formatTarget, tmuxAllowed, tmuxKey, tmuxScreen, tmuxSend } from './tmux-control.js';
 
 export interface ExtraCtx {
   req: http.IncomingMessage;
@@ -89,6 +89,10 @@ export async function handleExtra(ctx: ExtraCtx): Promise<boolean> {
   const session = mgr.tmuxTarget?.(id);
   if (!session) {
     json(res, 409, { error: 'tmux session not available' });
+    return true;
+  }
+  if (!tmuxAllowed(session)) {
+    json(res, 409, { error: 'tmux control not enabled for this card (TOWER_TMUX_ALLOW)' });
     return true;
   }
   const target = formatTarget(session);

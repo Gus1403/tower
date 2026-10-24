@@ -1,11 +1,19 @@
 #!/usr/bin/env node
-// tower — agent-side CLI. `tower ask [--recommendation "…"] "question"` asks the owner through Tower's unix socket.
+// tower — agent-side CLI over Tower's unix socket: ask the owner, message other sessions, hand off work, list agents.
 // Env: TOWER_AGENT_ID (this agent's id) and TOWER_SOCKET (path of <data dir>/agent.sock), both set by the server.
 import net from 'node:net';
 
 const HELP = `Usage:
   tower ask [--recommendation "your recommended answer"] "question text"
       Ask the owner a question in Tower. The answer arrives as your next message.
+  tower send --to <agent id or exact name> "text"
+      Send a message to another Tower session. It arrives there as a prompt "[From <you>] text"
+      (queued if that session is busy).
+  tower handoff [--kind devin|claude|codex] [--board programs] "task"
+      Open a new session for a task (default kind: yours). When its turn ends, its last message
+      arrives here as "[Handoff result from <name>] ...".
+  tower agents
+      List live sessions (id, name, board, customer, status) you can address with send.
   tower help
       Show this help.
 
@@ -21,48 +29,99 @@ if (!cmd || cmd === 'help' || cmd === '--help' || cmd === '-h') {
   process.exit(cmd ? 0 : 2);
 }
 
-if (cmd !== 'ask') {
+if (!['ask', 'send', 'handoff', 'agents'].includes(cmd)) {
   console.error(`tower: unknown command "${cmd}"\n\n${HELP}`);
   process.exit(2);
 }
 
-let recommendation;
-const parts = [];
-for (let i = 1; i < argv.length; i++) {
-  const a = argv[i];
-  if (a === '--recommendation' || a === '-r') {
-    recommendation = argv[++i];
-    if (recommendation === undefined) {
-      console.error('tower: --recommendation needs a value');
-      process.exit(2);
-    }
-  } else if (a.startsWith('--recommendation=')) {
-    recommendation = a.slice('--recommendation='.length);
-  } else {
-    parts.push(a);
-  }
-}
-const text = parts.join(' ').trim();
-if (!text) {
-  console.error('tower: missing question text\n\n' + HELP);
+const usage = (msg) => {
+  console.error(`tower: ${msg}\n\n${HELP}`);
   process.exit(2);
+};
+
+// parse --flag value / --flag=value for the allowed flags; the rest is the text
+function parse(flags) {
+  const opts = {};
+  const parts = [];
+  for (let i = 1; i < argv.length; i++) {
+    const a = argv[i];
+    let hit = false;
+    for (const [name, aliases] of Object.entries(flags)) {
+      if (aliases.includes(a)) {
+        const v = argv[++i];
+        if (v === undefined) usage(`${a} needs a value`);
+        opts[name] = v;
+        hit = true;
+        break;
+      }
+      const eq = aliases.find((x) => x.startsWith('--') && a.startsWith(x + '='));
+      if (eq) {
+        opts[name] = a.slice(eq.length + 1);
+        hit = true;
+        break;
+      }
+    }
+    if (!hit) parts.push(a);
+  }
+  return { opts, text: parts.join(' ').trim() };
 }
+
+let req;
+if (cmd === 'ask') {
+  const { opts, text } = parse({ recommendation: ['--recommendation', '-r'] });
+  if (!text) usage('missing question text');
+  req = { cmd: 'ask', text };
+  if (opts.recommendation && opts.recommendation.trim()) req.recommendation = opts.recommendation;
+} else if (cmd === 'send') {
+  const { opts, text } = parse({ to: ['--to', '-t'] });
+  if (!opts.to || !opts.to.trim()) usage('send needs --to <agent id or exact name>');
+  if (!text) usage('missing message text');
+  req = { cmd: 'send', to: opts.to, text };
+} else if (cmd === 'handoff') {
+  const { opts, text } = parse({ kind: ['--kind', '-k'], board: ['--board', '-b'] });
+  if (!text) usage('missing task text');
+  if (opts.kind && !['devin', 'claude', 'codex'].includes(opts.kind)) usage('--kind must be devin|claude|codex');
+  req = { cmd: 'handoff', task: text };
+  if (opts.kind) req.kind = opts.kind;
+  if (opts.board) req.board = opts.board;
+} else {
+  req = { cmd: 'agents' };
+}
+
 const agentId = process.env.TOWER_AGENT_ID;
 const sock = process.env.TOWER_SOCKET;
 if (!agentId || !sock) {
   console.error('tower: TOWER_AGENT_ID and TOWER_SOCKET must be set (they are set by Tower for agents it launches)');
   process.exit(2);
 }
+req.agentId = agentId;
 
-const req = { cmd: 'ask', agentId, text };
-if (recommendation && recommendation.trim()) req.recommendation = recommendation;
+function pad(s, n) {
+  s = String(s ?? '');
+  return s.length >= n ? s : s + ' '.repeat(n - s.length);
+}
+
+function success(reply) {
+  if (cmd === 'ask') return 'Asked. The owner will answer in Tower; the answer arrives as your next message.';
+  if (cmd === 'send') return `Sent to ${reply.agentId}${reply.queued ? ' (queued: that session is busy)' : ''}.`;
+  if (cmd === 'handoff') {
+    return `Handed off to ${reply.name} (${reply.agentId}). Its result arrives here as your next message when its turn ends.`;
+  }
+  const list = Array.isArray(reply.agents) ? reply.agents : [];
+  if (!list.length) return 'No live agents.';
+  const rows = [['ID', 'NAME', 'BOARD', 'CUSTOMER', 'STATUS']].concat(
+    list.map((a) => [a.id + (a.id === agentId ? ' (you)' : ''), a.name, a.board, a.customer || '-', a.status]),
+  );
+  const w = rows[0].map((_, i) => Math.min(40, Math.max(...rows.map((r) => String(r[i]).length))));
+  return rows.map((r) => r.map((c, i) => (i === r.length - 1 ? c : pad(c, w[i]))).join('  ')).join('\n');
+}
 
 const conn = net.createConnection(sock);
 let buf = '';
 const timer = setTimeout(() => {
   console.error('tower: no reply from Tower (timeout)');
   process.exit(1);
-}, 10000);
+}, 15000);
 conn.setEncoding('utf8');
 conn.on('connect', () => conn.write(JSON.stringify(req) + '\n'));
 conn.on('data', (c) => {
@@ -79,10 +138,10 @@ conn.on('data', (c) => {
   }
   conn.end();
   if (reply && reply.ok) {
-    console.log('Asked. The owner will answer in Tower; the answer arrives as your next message.');
+    console.log(success(reply));
     process.exit(0);
   }
-  console.error(`tower: ask failed: ${(reply && reply.error) || 'unknown error'}`);
+  console.error(`tower: ${cmd} failed: ${(reply && reply.error) || 'unknown error'}`);
   process.exit(1);
 });
 conn.on('error', (e) => {

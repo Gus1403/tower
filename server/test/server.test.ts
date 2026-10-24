@@ -632,7 +632,15 @@ test('wave B: attachments uploaded, copied into cwd (deduped) and mentioned in t
     assert.equal(readFileSync(path.join(cwd, 'attachments', 'notes.txt'), 'utf8'), 'hello attachment');
     // queued while busy: second copy is deduped and the stored queued text carries the line
     await untilStatus(h, a.id, 'working');
-    await h.post(`/api/agents/${a.id}/prompt`, { text: 'again', attachments: [upId] });
+    // review fix A7: the stored upload is deleted once copied, so the id cannot be reused
+    assert.equal((await h.post(`/api/agents/${a.id}/prompt`, { text: 'again', attachments: [upId] })).status, 400);
+    const up2 = await fetch(`${h.base}/api/uploads?name=notes.txt`, {
+      method: 'POST',
+      headers: { ...AUTH, 'content-type': 'application/octet-stream' },
+      body: 'hello attachment',
+    });
+    const { id: upId2 } = (await up2.json()) as { id: string };
+    await h.post(`/api/agents/${a.id}/prompt`, { text: 'again', attachments: [upId2] });
     assert.ok(existsSync(path.join(cwd, 'attachments', 'notes-1.txt')));
     assert.deepEqual(h.last(a.id)?.queued, ['again\n\nAttached: attachments/notes-1.txt']);
     await waitFor(() =>

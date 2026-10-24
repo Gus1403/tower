@@ -49,6 +49,20 @@ export function getUpload(id: string): StoredUpload | undefined {
   }
 }
 
+/** Removes an upload's stored bytes + sidecar (after attach() copied them into an agent cwd). */
+export function deleteUpload(id: string): void {
+  if (typeof id !== 'string' || !ID_RE.test(id)) return;
+  index.delete(id);
+  const dir = uploadsDir();
+  for (const f of [path.join(dir, id), path.join(dir, `${id}.json`)]) {
+    try {
+      fs.rmSync(f, { force: true });
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
 export type SaveResult = { ok: true; upload: StoredUpload } | { ok: false; code: 413 | 500; error: string };
 
 /** Streams the request body to disk; on overflow removes the partial file and reports 413 (caller answers + destroys). */

@@ -31,6 +31,7 @@ const manager = new AgentManager({
   accounts,
   store,
   notesFile: path.join(towerDataDir(), 'notes.json'),
+  boardsFile: path.join(towerDataDir(), 'boards.json'),
 });
 accounts.attach(manager);
 const server = createServer(manager, token);

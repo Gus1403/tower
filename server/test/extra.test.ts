@@ -185,7 +185,12 @@ test('tmux routes: 404 unknown, 409 when TOWER_TMUX_INTERACTIVE is not 1 or card
 
 test('tmux send/key/screen against a throwaway -L tmux server running cat', { skip: !hasTmux && 'tmux not installed' }, async () => {
   process.env.TOWER_TMUX_INTERACTIVE = '1';
+  delete process.env.TOWER_TMUX_ALLOW;
   try {
+    // review fix A3: the flag alone is not enough; the session must match TOWER_TMUX_ALLOW
+    assert.equal((await fetch(`${base}/api/agents/t1/screen`)).status, 409);
+    process.env.TOWER_TMUX_ALLOW = 'other, t?';
+    assert.equal((await fetch(`${base}/api/agents/t1/screen`)).status, 200);
     const bad = await fetch(`${base}/api/agents/t1/key`, { method: 'POST', body: JSON.stringify({ key: 'C-d' }) });
     assert.equal(bad.status, 400);
     const long = await fetch(`${base}/api/agents/t1/send`, {

@@ -6,7 +6,7 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
-import type { AgentManager } from './agents.js';
+import { CUSTOMER_RE, MAX_TASK_CHARS, type AgentManager } from './agents.js';
 import { handleExtra } from './extra.js';
 import type { Account, LaunchRequest, ServerEvent } from '../../shared/contract.js';
 
@@ -55,6 +55,9 @@ export function createServer(manager: AgentManager, token: string) {
   manager.on('capacity', (capacity) => send({ type: 'capacity', capacity }));
   manager.on('agent_removed', (agentId) => send({ type: 'agent_removed', agentId }));
   manager.on('notes', (notes) => send({ type: 'notes', notes }));
+  manager.on('boards', (boards) => send({ type: 'boards', boards }));
+  // rotation changes go out on WS from server start, not only after the first HTTP request
+  (manager as { rotation?: { bindSend?: (s: (ev: ServerEvent) => void) => void } }).rotation?.bindSend?.(send);
   const broadcastAccounts = (accounts: Account[]) => send({ type: 'accounts', accounts });
 
   const authed = (req: http.IncomingMessage): boolean => {
@@ -131,6 +134,7 @@ export function createServer(manager: AgentManager, token: string) {
 
       const feedMatch = p.match(/^\/api\/agents\/([^/]+)\/feed$/);
       if (req.method === 'GET' && feedMatch) {
+        if (manager.isObserved(feedMatch[1])) return json(res, 200, []);
         const feed = manager.getFeed(feedMatch[1]);
         if (!feed) return json(res, 404, { error: 'no such agent' });
         return json(res, 200, feed);
@@ -144,6 +148,15 @@ export function createServer(manager: AgentManager, token: string) {
         }
         if (typeof body.task !== 'string' || !body.task.trim()) {
           return json(res, 400, { error: 'task is required' });
+        }
+        if (body.task.length > MAX_TASK_CHARS) {
+          return json(res, 400, { error: `task too long (max ${MAX_TASK_CHARS} chars)` });
+        }
+        if (body.board != null && (typeof body.board !== 'string' || !manager.hasBoard(body.board))) {
+          return json(res, 400, { error: 'unknown board' });
+        }
+        if (body.customer != null && (typeof body.customer !== 'string' || !CUSTOMER_RE.test(body.customer))) {
+          return json(res, 400, { error: 'customer must match /^[A-Za-z0-9._ -]{1,64}$/' });
         }
         if (body.name != null && typeof body.name !== 'string') {
           return json(res, 400, { error: 'name must be a string' });
@@ -162,14 +175,33 @@ export function createServer(manager: AgentManager, token: string) {
             name: body.name,
             model: body.model,
             accountId: body.accountId === 'auto' ? undefined : body.accountId,
+            board: body.board,
+            customer: body.customer,
           });
         } catch (err) {
-          if (err instanceof Error && err.message === 'unknown account') {
-            return json(res, 400, { error: 'unknown account' });
+          if (err instanceof Error && (err.message === 'unknown account' || err.message === 'unknown board')) {
+            return json(res, 400, { error: err.message });
           }
           throw err;
         }
         return json(res, 201, agent);
+      }
+
+      // ---- Wave D: boards ----
+      if (req.method === 'POST' && p === '/api/boards') {
+        const body = (await readBody(req)) as { name?: unknown; columns?: unknown };
+        if (typeof body.name !== 'string' || !body.name.trim()) return json(res, 400, { error: 'name is required' });
+        const r = manager.createBoard(body.name, body.columns);
+        if (!r.ok) return json(res, r.error === 'duplicate' ? 409 : 400, { error: r.message });
+        return json(res, 201, r.board);
+      }
+      const boardDel = p.match(/^\/api\/boards\/([^/]+)$/);
+      if (req.method === 'DELETE' && boardDel) {
+        const r = manager.deleteBoard(decodeURIComponent(boardDel[1]));
+        if (r === 'notfound') return json(res, 404, { error: 'no such board' });
+        if (r === 'default') return json(res, 409, { error: 'default boards cannot be deleted' });
+        if (r === 'not_empty') return json(res, 409, { error: 'board is not empty' });
+        return json(res, 200, { ok: true });
       }
 
       // ---- Wave B: notes ----
@@ -201,6 +233,9 @@ export function createServer(manager: AgentManager, token: string) {
           );
         } catch (err) {
           if (err instanceof Error && err.message === 'unknown account') return json(res, 400, { error: 'unknown account' });
+          if (err instanceof Error && err.message === 'note archived') {
+            return json(res, 409, { error: 'note is archived or already being started' });
+          }
           throw err;
         }
         if (!agent) return json(res, 404, { error: 'no such note' });
@@ -240,7 +275,7 @@ export function createServer(manager: AgentManager, token: string) {
         return json(res, 200, { ok: true });
       }
 
-      const actMatch = p.match(/^\/api\/agents\/([^/]+)\/(prompt|permission|stop|interrupt|mode|config|resume|answer|move|archive)$/);
+      const actMatch = p.match(/^\/api\/agents\/([^/]+)\/(prompt|permission|stop|interrupt|mode|config|resume|answer|move|archive|board)$/);
       if (req.method === 'POST' && actMatch) {
         const [, id, action] = actMatch;
         if (manager.isObserved(id)) {
@@ -284,6 +319,20 @@ export function createServer(manager: AgentManager, token: string) {
             return json(res, 400, { error: 'unknown account' });
           }
           return json(res, 201, r.agent);
+        }
+        if (action === 'board') {
+          const body = (await readBody(req)) as { board?: unknown; customer?: unknown };
+          if (typeof body.board !== 'string') return json(res, 400, { error: 'board is required' });
+          if (
+            body.customer != null &&
+            (typeof body.customer !== 'string' || (body.customer !== '' && !CUSTOMER_RE.test(body.customer)))
+          ) {
+            return json(res, 400, { error: 'customer must match /^[A-Za-z0-9._ -]{1,64}$/' });
+          }
+          const r = manager.setBoard(id, body.board, body.customer as string | null | undefined);
+          if (r === 'unknown_board') return json(res, 400, { error: 'unknown board' });
+          if (r === 'notfound') return json(res, 404, { error: 'no such agent' });
+          return json(res, 200, { ok: true });
         }
         if (action === 'archive') {
           const body = (await readBody(req)) as { archived?: unknown };
