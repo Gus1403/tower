@@ -248,7 +248,8 @@ export function Inbox() {
   const first = pending[0];
   const onKey = useCallback(
     (e: KeyboardEvent) => {
-      if (e.key !== 'Enter' || e.shiftKey || e.ctrlKey || launchOpen || !first) return;
+      // the inbox is hidden while a session is open, so it must not act on keys then
+      if (e.key !== 'Enter' || e.shiftKey || e.ctrlKey || launchOpen || !first || getState().openId) return;
       // row 38: Enter allows only when the inbox has focus; ⌘Enter allows from anywhere outside a text field
       const t = e.target as HTMLElement;
       if (t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT' || t.tagName === 'BUTTON' || t.isContentEditable)) return;

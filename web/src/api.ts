@@ -1,4 +1,4 @@
-import type { Account, AgentKind, AgentSummary, Board, FeedItem, LaunchRequest, Note, RotationState, ServerEvent } from '../../shared/contract';
+import type { Account, AgentKind, AgentSummary, Board, FeedItem, LaunchRequest, Note, RotationState, ServerEvent, SessionWorkspace } from '../../shared/contract';
 import { applyEvent, getState, setFetchedFeed, setState } from './store';
 
 export interface Upload {
@@ -9,6 +9,7 @@ export interface Upload {
 
 export interface Transport {
   fetchFeed(id: string): Promise<FeedItem[]>;
+  fetchWorkspace(id: string, before?: string): Promise<SessionWorkspace>;
   launch(req: LaunchRequest): Promise<AgentSummary>;
   prompt(id: string, text: string, interrupt?: boolean, attachments?: string[]): Promise<{ queued: boolean }>;
   answer(id: string, questionId: string, text: string): Promise<void>;
@@ -70,6 +71,8 @@ function realTransport(): Transport {
   }
   return {
     fetchFeed: (id) => req<FeedItem[]>('GET', `/api/agents/${encodeURIComponent(id)}/feed`),
+    fetchWorkspace: (id, before) =>
+      req<SessionWorkspace>('GET', `/api/agents/${encodeURIComponent(id)}/workspace${before ? `?before=${encodeURIComponent(before)}` : ''}`),
     launch: (r) => req<AgentSummary>('POST', '/api/agents', r),
     prompt: (id, text, interrupt, attachments) =>
       req<{ queued: boolean }>('POST', `/api/agents/${encodeURIComponent(id)}/prompt`, {
@@ -181,6 +184,7 @@ export async function loadFeed(id: string, force = false): Promise<void> {
 }
 
 export const api = {
+  workspace: (id: string, before?: string) => transport.fetchWorkspace(id, before),
   launch: (r: LaunchRequest) => transport.launch(r),
   prompt: (id: string, text: string, interrupt?: boolean, attachments?: string[]) => transport.prompt(id, text, interrupt, attachments),
   answer: (id: string, questionId: string, text: string) => transport.answer(id, questionId, text),

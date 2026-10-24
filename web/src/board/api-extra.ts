@@ -100,6 +100,8 @@ function mockScreen(id: string): string[] {
       `  ⎿  12:01:04 GET /health 200 3ms`,
       `     12:01:05 POST /v1/messages 200 412ms`,
       `     12:01:07 POST /v1/messages 200 389ms`,
+      ...Array.from({ length: 40 }, (_, i) => `     12:0${2 + Math.floor(i / 10)}:${String(10 + i).padStart(2, '0')} POST /v1/messages 200 ${380 + ((i * 37) % 60)}ms`),
+      `     12:06:59 WARN slow upstream trace_id=7f3c2a9e41b84d0c9a1e5f6b7c8d9e0f route=/v1/messages/stream tenant=acme-corp region=us-east-1 attempt=2 upstream_ms=1840 queue_ms=12 retry_after=none note="first token arrived late but within budget"`,
       ``,
       `⏺ p95 is 405 ms, in line with the previous release (398 ms). Still watching.`,
       ``,

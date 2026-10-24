@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { AgentSummary } from '../../../shared/contract';
 import { api, type Upload } from '../api';
 import { patchAgentLocal, toast } from '../store';
+import { getDraft, restoreDraft, setDraft } from '../workspace/drafts';
 import './composer.css';
 
 type Att = { key: string; name: string; size: number; id?: string; failed?: boolean };
@@ -47,8 +48,20 @@ function ClipIcon() {
 }
 const fmtSize = (n: number) => (n < 1024 ? `${n} B` : n < 1024 * 1024 ? `${Math.round(n / 1024)} KB` : `${(n / 1024 / 1024).toFixed(1)} MB`);
 
-export function Composer({ a }: { a: AgentSummary }) {
-  const [text, setText] = useState('');
+export function Composer({ a, toolbar }: { a: AgentSummary; toolbar?: ReactNode }) {
+  const [text, setTextState] = useState(() => getDraft(a.id));
+  const [sending, setSending] = useState(false);
+  const sendingRef = useRef(false);
+  const mounted = useRef(true);
+  const idRef = useRef(a.id);
+  idRef.current = a.id;
+  // every edit is kept as this session's draft, so switching sessions never loses or mixes text
+  const setText = (v: string | ((t: string) => string)) =>
+    setTextState((t) => {
+      const next = typeof v === 'function' ? v(t) : v;
+      setDraft(idRef.current, next);
+      return next;
+    });
   const [atts, setAtts] = useState<Att[]>([]);
   const [drag, setDrag] = useState(false);
   const [menuIdx, setMenuIdx] = useState(0);
@@ -78,9 +91,18 @@ export function Composer({ a }: { a: AgentSummary }) {
   const uploading = atts.some((x) => !x.id && !x.failed);
   const ready = atts.filter((x) => x.id);
 
-  useEffect(() => () => recRef.current?.stop(), []);
   useEffect(() => {
-    setText('');
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      recRef.current?.stop();
+    };
+  }, []);
+  const shownId = useRef(a.id);
+  useEffect(() => {
+    if (shownId.current === a.id) return;
+    shownId.current = a.id;
+    setTextState(getDraft(a.id));
     setAtts([]);
   }, [a.id]);
 
@@ -154,21 +176,31 @@ export function Composer({ a }: { a: AgentSummary }) {
 
   const send = async (interrupt: boolean) => {
     const t = text.trim();
-    if ((!t && ready.length === 0) || disabled || uploading) return;
+    if ((!t && ready.length === 0) || disabled || uploading || sendingRef.current) return;
+    const id = a.id;
     const sentAtts = atts;
     const ids = ready.map((x) => x.id!);
+    sendingRef.current = true;
+    setSending(true);
     setText('');
     setAtts([]);
     recRef.current?.stop();
     const label = t || ready.map((x) => x.name).join(', ');
-    if (busy) patchAgentLocal(a.id, { queued: interrupt ? [label, ...queued] : [...queued, label] });
+    if (busy) patchAgentLocal(id, { queued: interrupt ? [label, ...queued] : [...queued, label] });
     try {
-      await api.prompt(a.id, t, interrupt || undefined, ids.length ? ids : undefined);
+      await api.prompt(id, t, interrupt || undefined, ids.length ? ids : undefined);
     } catch (e) {
-      setText(t);
-      setAtts(sentAtts);
-      patchAgentLocal(a.id, { queued });
-      toast(`Could not send: ${(e as Error).message}`);
+      // a late failure goes back to the session it was meant for, never into whichever session is open now
+      restoreDraft(id, t);
+      if (mounted.current && idRef.current === id) {
+        setTextState(getDraft(id));
+        setAtts((xs) => (xs.length ? xs : sentAtts));
+      }
+      patchAgentLocal(id, { queued });
+      toast(`Could not send${idRef.current === id ? '' : ` to ${a.name}`}: ${(e as Error).message}`);
+    } finally {
+      sendingRef.current = false;
+      if (mounted.current) setSending(false);
     }
   };
 
@@ -182,7 +214,7 @@ export function Composer({ a }: { a: AgentSummary }) {
       </div>
     );
   }
-  const canSend = !disabled && !uploading && (!!text.trim() || ready.length > 0);
+  const canSend = !disabled && !uploading && !sending && (!!text.trim() || ready.length > 0);
   return (
     <div
       className={`composer-wrap ${drag ? 'c-drag' : ''}`}
@@ -259,30 +291,13 @@ export function Composer({ a }: { a: AgentSummary }) {
             ))}
           </div>
         )}
-        {!disabled && (
-          <>
-            <button className="c-icon c-attach" aria-label="Attach files" title="Attach files" onClick={() => fileRef.current?.click()}>
-              <ClipIcon />
-            </button>
-            <input
-              ref={fileRef}
-              type="file"
-              multiple
-              hidden
-              className="c-file"
-              onChange={(e) => {
-                addFiles(e.target.files);
-                e.target.value = '';
-              }}
-            />
-          </>
-        )}
         <textarea
           ref={taRef}
           value={text}
           disabled={disabled}
           placeholder={listening ? 'Listening…' : hint}
-          rows={1}
+          rows={2}
+          aria-label={`Message ${a.name}`}
           onChange={(e) => setText(e.target.value)}
           onPaste={(e) => {
             const files = Array.from(e.clipboardData.items)
@@ -314,32 +329,55 @@ export function Composer({ a }: { a: AgentSummary }) {
                 return;
               }
             }
-            if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+            if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing && e.keyCode !== 229) {
               e.preventDefault();
               void send(busy && (e.metaKey || e.ctrlKey));
             }
           }}
         />
-        {Speech && !disabled && (
-          <button
-            className={`c-icon c-mic ${listening ? 'on' : ''}`}
-            aria-label={listening ? 'Stop dictation' : 'Dictate'}
-            aria-pressed={listening}
-            title={listening ? 'Stop dictation' : 'Dictate'}
-            onClick={toggleMic}
-          >
-            <MicIcon />
-          </button>
-        )}
-        {busy && !disabled ? (
-          <button className="btn btn-primary btn-sm c-queue" disabled={!canSend} onClick={() => void send(false)} title="Enter queues · ⌘Enter interrupts & sends">
-            Queue
-          </button>
-        ) : (
-          <button className="btn btn-primary send" disabled={!canSend} onClick={() => void send(false)} aria-label="Send">
-            ↑
-          </button>
-        )}
+        <div className="c-tools">
+          {!disabled && (
+            <>
+              <button className="c-icon c-attach" aria-label="Attach files" title="Attach files" onClick={() => fileRef.current?.click()}>
+                <ClipIcon />
+              </button>
+              <input
+                ref={fileRef}
+                type="file"
+                multiple
+                hidden
+                className="c-file"
+                onChange={(e) => {
+                  addFiles(e.target.files);
+                  e.target.value = '';
+                }}
+              />
+            </>
+          )}
+          {Speech && !disabled && (
+            <button
+              className={`c-icon c-mic ${listening ? 'on' : ''}`}
+              aria-label={listening ? 'Stop dictation' : 'Dictate'}
+              aria-pressed={listening}
+              title={listening ? 'Stop dictation' : 'Dictate'}
+              onClick={toggleMic}
+            >
+              <MicIcon />
+            </button>
+          )}
+          {toolbar}
+          <span className="spacer" />
+          {!disabled && <span className="c-hint">{busy ? 'Enter queues · ⌘Enter interrupts' : 'Enter sends · Shift+Enter new line'}</span>}
+          {busy && !disabled ? (
+            <button className="btn btn-primary c-queue c-send" disabled={!canSend} onClick={() => void send(false)} title="Enter queues · ⌘Enter interrupts & sends" aria-busy={sending}>
+              Queue
+            </button>
+          ) : (
+            <button className="btn btn-primary send c-send" disabled={!canSend} onClick={() => void send(false)} aria-label="Send" aria-busy={sending}>
+              {sending ? 'Sending…' : 'Send'}
+            </button>
+          )}
+        </div>
       </div>
       {drag && <div className="c-dropzone">Drop files to attach</div>}
     </div>

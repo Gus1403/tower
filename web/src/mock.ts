@@ -12,6 +12,7 @@ import type {
   ActivityEntry,
   RotationState,
   ServerEvent,
+  SessionWorkspace,
 } from '../../shared/contract';
 import type { Transport } from './api';
 import type { LaunchRequest } from '../../shared/contract';
@@ -390,6 +391,98 @@ export function mockTransport(): Transport {
   });
   for (const o of [o1, o2]) feed(o.id, { type: 'status', id: uid('st'), at: o.createdAt, text: 'Observed from tmux (read-only)' }, true);
 
+  // ---------- session workspace: observed tmux history + context ----------
+  // t3w5 has a long saved conversation (paged), t2y4 a short one, t1x9 none (its terminal is the only view).
+  const o3: AgentSummary = {
+    ...mkAgent('t3w5', 'claude', 'billing-webhooks', 'tmux session "billing" on eva-forge', 'working', 7200),
+    source: 'tmux',
+    board: 'programs',
+    interactive: true,
+    cwd: '~/code/eva/.desk/billing',
+    model: 'claude-opus-5-5',
+    lastMessage: 'Replaying the failed Stripe webhooks against the staging desk…',
+  };
+  agents.set(o3.id, o3);
+  const history = new Map<string, FeedItem[]>();
+  const o3Hist: FeedItem[] = [];
+  const steps = [
+    'Read server/billing/webhooks.ts',
+    'Run pnpm vitest billing',
+    'Search "invoice.paid"',
+    'Edit server/billing/webhooks.ts',
+    'Run ./eva test ready',
+  ];
+  for (let n = 0; n < 32; n++) {
+    const at = T - 7200_000 + n * 200_000;
+    o3Hist.push({ type: 'user_message', id: `t3-u${n}`, at, text: n === 0 ? 'Stripe says 14 invoice.paid webhooks failed overnight. Find out why and fix it without touching production data.' : `Step ${n}: keep going, and tell me before anything visible changes.` });
+    const tool = steps[n % steps.length];
+    const toolCallId = `t3-tc${n}`;
+    o3Hist.push({ type: 'tool_call', id: `tool-${toolCallId}`, at: at + 20_000, toolCallId, title: tool, toolKind: tool.startsWith('Run') ? 'execute' : tool.startsWith('Edit') ? 'edit' : 'read', status: n === 7 ? 'failed' : 'completed', detail: tool.replace(/^\w+\s/, ''), output: fakeOutput(tool, tool.replace(/^\w+\s/, '')) });
+    o3Hist.push({
+      type: 'agent_message',
+      id: `t3-m${n}`,
+      at: at + 60_000,
+      text:
+        n === 0
+          ? 'The failures all share one cause: the handler rejects events whose `customer` field is **null**, which Stripe sends for guest checkouts.\n\n- 14 events since 02:10\n- All `invoice.paid`\n- None reached the ledger'
+          : `Checkpoint ${n}: ${n % 3 === 0 ? 'tests are green on the desk.' : n % 3 === 1 ? 'replayed one more batch; no duplicates in the ledger.' : 'reviewed the retry path, no change needed.'}`,
+    });
+  }
+  history.set(o3.id, o3Hist);
+  history.set(o2.id, [
+    { type: 'user_message', id: 't2-u0', at: T - 3000_000, text: 'Run the cross-model review on the billing branch and fold anything P0/P1.' },
+    { type: 'tool_call', id: 'tool-t2-tc0', at: T - 2900_000, toolCallId: 't2-tc0', title: 'Run ./eva review --cross-model', toolKind: 'execute', status: 'completed', detail: './eva review --cross-model', output: 'P0: 0\nP1: 1 (retry without idempotency key)\nP2: 3' },
+    { type: 'agent_message', id: 't2-m0', at: T - 2800_000, text: 'Cross-model review: **0 P0, 1 P1** — the retry path could double-post without an idempotency key. Folding it now.' },
+    { type: 'tool_call', id: 'tool-t2-tc1', at: T - 2700_000, toolCallId: 't2-tc1', title: 'Edit server/billing/retry.ts', toolKind: 'edit', status: 'completed', detail: 'server/billing/retry.ts  +9 −2', output: fakeOutput('Edit server/billing/retry.ts', 'server/billing/retry.ts') },
+    { type: 'agent_message', id: 't2-m1', at: T - 2600_000, text: 'Cross-model review: 0 P0, 1 P1 folded.' },
+  ]);
+  const contexts: Record<string, SessionWorkspace['context']> = {
+    [o3.id]: {
+      summary: 'Fixing failed Stripe invoice.paid webhooks for guest checkouts on the billing desk. Production data is untouched; replays run on staging.',
+      pending: [
+        { text: 'Replay the 14 failed webhooks in production once the fix ships?', recommendation: 'Yes, after the ready gate passes; replays are idempotent.' },
+        { text: 'Notify the two affected customers?', recommendation: 'Only if a replay fails.' },
+      ],
+      delivery: { text: 'Fix pushed to the billing branch; ready gate green.', url: 'https://github.com/example/eva/pull/482', at: new Date(T - 20 * 60_000).toISOString() },
+      links: [
+        { title: 'Pull request #482', url: 'https://github.com/example/eva/pull/482' },
+        { title: 'Stripe webhook log', url: 'https://dashboard.stripe.com/test/webhooks' },
+      ],
+    },
+    [o2.id]: { summary: 'Cross-model review of the billing branch. One P1 folded; waiting for the next diff.' },
+    [o1.id]: { summary: 'Watching the canary deploy logs and comparing p95 with the previous release.' },
+  };
+  const PAGE = 30;
+  const workspaceOf = (id: string, before?: string): SessionWorkspace | null => {
+    const a = agents.get(id);
+    if (!a) return null;
+    const context = contexts[id] ?? {};
+    if (a.source !== 'tmux') {
+      return { conversation: { available: true, items: (feeds.get(id) ?? []).map((x) => ({ ...x })), hasMore: false }, context };
+    }
+    const all = history.get(id);
+    if (!all) {
+      return {
+        conversation: { available: false, reason: 'No saved conversation was found for this session.', items: [], hasMore: false },
+        context,
+      };
+    }
+    const end = before !== undefined ? Math.max(0, Math.min(all.length, Number(before) || 0)) : all.length;
+    const start = Math.max(0, end - PAGE);
+    return {
+      conversation: { available: true, items: all.slice(start, end).map((x) => ({ ...x })), hasMore: start > 0, before: start > 0 ? String(start) : undefined },
+      context,
+    };
+  };
+  // the long session keeps working: one new checkpoint every 12 s (a few times)
+  let grow = 0;
+  const growTimer = setInterval(() => {
+    if (++grow > 8) return clearInterval(growTimer);
+    const at = Date.now();
+    o3Hist.push({ type: 'agent_message', id: `t3-live${grow}`, at, text: `Live update ${grow}: replayed batch ${grow} of 8 on staging, ledger matches Stripe.` });
+    patch(o3.id, { lastMessage: `Replayed batch ${grow} of 8 on staging.` });
+  }, 12_000);
+
   // ---------- scripts ----------
   runners.set(a1.id, {
     i: 0,
@@ -593,6 +686,10 @@ export function mockTransport(): Transport {
         onEvent({ type: 'snapshot', state: { agents: [...agents.values()], capacity: capacity(), accounts: accounts(), notes: notes.map((n) => ({ ...n })), rotation: { ...rotation, activity: rotation.activity.map((x) => ({ ...x })) }, boards: boards.map((b) => ({ ...b })), host: 'eva-forge' } });
         setInterval(tick, 650);
       }, 0);
+    },
+    fetchWorkspace(id, before) {
+      const w = workspaceOf(id, before);
+      return w ? delay(w, 260) : fail('No such agent');
     },
     fetchFeed(id) {
       const list = feeds.get(id);

@@ -5,9 +5,9 @@ import { ArchivedSection, BoardCard, DT_AGENT, DT_NOTE, matches, SearchBox } fro
 import { mockMakeInteractive, useBoardNotes } from './board/api-extra';
 import { NewAgentDialog } from './NewAgent';
 import { NotesColumn, StartNoteDialog } from './Notes';
-import { Panel } from './Panel';
 import { getState, openAgent, setLaunchOpen, useStore } from './store';
-import { TmuxPanel } from './TmuxPanel';
+import { Workspace } from './workspace/Workspace';
+import { initSessionRoute } from './workspace/route';
 import { Inbox, TopBar } from './ui';
 import { initNotifications } from './notify';
 import { subscribe } from './store';
@@ -22,6 +22,7 @@ initNotifications(
       .map((a) => ({ id: a.id, name: a.name, title: a.pendingPermission?.title ?? a.questions?.[0]?.text ?? a.lastMessage ?? '' })),
   subscribe,
 );
+initSessionRoute();
 
 type Col = string; // Board column id (Wave D)
 type Tab = Col | 'notes';
@@ -87,6 +88,7 @@ export function App() {
   const [dropCol, setDropCol] = useState<Col | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const searchRefPhone = useRef<HTMLInputElement>(null);
+  const boardRef = useRef<HTMLDivElement>(null);
 
   // mock only: one observed tmux card is interactive so the live panel can be demoed
   useEffect(() => mockMakeInteractive(), [agents]);
@@ -160,7 +162,7 @@ export function App() {
     const onKey = (e: KeyboardEvent) => {
       if (e.metaKey || e.ctrlKey || e.altKey || launchOpen || starting) return;
       if (isTyping(e.target)) return;
-      if (e.key === '/') {
+      if (e.key === '/' && !getState().openId) {
         e.preventDefault();
         (window.matchMedia('(max-width: 767px)').matches ? searchRefPhone : searchRef).current?.focus();
         return;
@@ -184,8 +186,20 @@ export function App() {
     return () => window.removeEventListener('keydown', onKey, true);
   }, [step, focusId, openItem, launchOpen, starting, q]);
 
-  const open = openId ? agents[openId] : undefined;
-  const tmuxOpen = open && open.source === 'tmux' && open.interactive;
+  // the board stays mounted (filters, tabs and scroll survive) but is hidden and inert behind the workspace
+  useEffect(() => {
+    const el = boardRef.current;
+    if (!el) return;
+    if (openId) {
+      el.setAttribute('inert', '');
+      el.setAttribute('aria-hidden', 'true');
+      document.documentElement.classList.add('ws-lock');
+    } else {
+      el.removeAttribute('inert');
+      el.removeAttribute('aria-hidden');
+      document.documentElement.classList.remove('ws-lock');
+    }
+  }, [openId]);
 
   const startCol = isPrograms ? COLS.find((c) => c.statuses.includes('working'))?.key : undefined;
   const colDrop = (c: Col) => ({
@@ -210,7 +224,7 @@ export function App() {
 
   return (
     <div
-      className={`app ${openId ? 'has-panel' : ''}`}
+      className={`app ${openId ? 'ws-active' : ''}`}
       onDragStart={(e) => setDragKind(e.dataTransfer.types.includes(DT_AGENT) ? 'agent' : e.dataTransfer.types.includes(DT_NOTE) ? 'note' : null)}
       onDragEnd={() => {
         setDragKind(null);
@@ -218,11 +232,12 @@ export function App() {
       }}
       onDrop={() => setDragKind(null)}
     >
+      <div className="board-view" ref={boardRef}>
       <TopBar
         search={<SearchBox ref={searchRef} value={q} onChange={setQ} className="search-desk" />}
         tabs={<BoardTabs boards={boards} active={boardId} counts={counts} />}
       />
-      {!connected && (
+      {!connected && !openId && (
         <div className="reconnect">
           <span className="spin" /> {everConnected ? 'Reconnecting…' : 'Connecting…'}
         </div>
@@ -300,7 +315,8 @@ export function App() {
         )}
         <ArchivedSection agents={archived} notes={archivedNotes} dragActive={dragKind === 'agent'} />
       </main>
-      {tmuxOpen ? <TmuxPanel a={open} onNext={() => step(1, true)} onPrev={() => step(-1, true)} /> : <Panel />}
+      </div>
+      <Workspace onNext={() => step(1, true)} onPrev={() => step(-1, true)} canStep={order.some((x) => !x.startsWith('note:') && x !== openId)} />
       {starting && <StartNoteDialog note={starting} onClose={() => setStarting(null)} />}
       <NewAgentDialog />
       <AccountsPanel />
