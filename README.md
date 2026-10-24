@@ -44,16 +44,16 @@ board above every agent on your own machine — your repos, your secrets, the su
 
 ## Screenshots
 
+| Board with the Needs-you strip (light) | Dark |
+|---|---|
+| ![light](web/verify/out/wsb-desk-light-panel.png) | ![dark](web/verify/out/ws-desk-dark-programs.png) |
+
 Live on the real server — a Devin agent asking to run a shell command, approved from the inbox:
 
 ![live inbox](web/verify/out/live-desktop-inbox.png)
 
-| Board with the Needs-you inbox | Agent panel: plan + live feed | Phone |
-|---|---|---|
-| ![board](web/verify/out/a-desktop-board.png) | ![panel](web/verify/out/b-desktop-panel.png) | ![phone](web/verify/out/d-phone-board.png) |
-
-(Captured headless by `web/verify/verify-live.mjs` against the live server and `web/verify/verify.mjs` in mock
-mode. Existing tmux sessions are shown redacted.)
+(Headless Playwright captures: `web/verify/*.mjs` in mock mode and `verify-live*.mjs` against the live server.
+Existing tmux sessions are shown redacted.)
 
 ## Architecture
 
