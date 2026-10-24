@@ -1,0 +1,34 @@
+import os from 'node:os';
+import path from 'node:path';
+import { AgentManager } from './agents.js';
+import { createServer } from './http.js';
+
+const token = process.env.TOWER_TOKEN;
+if (!token) {
+  console.error('TOWER_TOKEN is required; refusing to start');
+  process.exit(1);
+}
+
+const host = process.env.TOWER_HOST || '127.0.0.1';
+const port = Number(process.env.TOWER_PORT || 4747);
+const workDir = path.resolve(
+  (process.env.TOWER_WORK_DIR || '~/tower-work').replace(/^~/, os.homedir()),
+);
+const stuckMs = Number(process.env.TOWER_STUCK_MS || 300000);
+
+const manager = new AgentManager({ workDir, stuckMs });
+const server = createServer(manager, token);
+
+server.listen(port, host, () => {
+  console.log(`[tower] listening on http://${host}:${port} (work dir ${workDir})`);
+});
+
+const shutdown = async () => {
+  console.log('[tower] shutting down, stopping agents');
+  manager.shutdown();
+  await manager.stopAll();
+  server.close();
+  process.exit(0);
+};
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);

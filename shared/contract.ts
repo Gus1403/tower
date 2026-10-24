@@ -105,7 +105,15 @@ export interface StateResponse {
 // POST /api/agents                        body LaunchRequest -> AgentSummary (201)
 // POST /api/agents/:id/prompt             body { text: string } -> 202 (409 if status is working/needs_you/starting)
 // POST /api/agents/:id/permission         body { requestId: string; optionId: string } -> 200 (404 if no such pending request)
-// POST /api/agents/:id/stop               -> 200 (cancels the turn, kills the process, status stopped)
+//      ACP reply is nested: { outcome: { outcome: 'selected', optionId } }
+// POST /api/agents/:id/stop               -> 200: (a) answer any pending permission { outcome: { outcome: 'cancelled' } },
+//      (b) send session/cancel, (c) SIGTERM then SIGKILL after 3 s; status stopped
+// ACP v1 notes for the server (SDK 1.9.0): message/thought chunks carry content: ContentBlock — use text only when
+// content.type === 'text', render other blocks as "[image]" etc.; tool_call_update fields are partial — merge onto the
+// stored tool call (last writer wins per field) and always emit the full merged item; permission title/toolKind/detail
+// come from params.toolCall.{title,kind,rawInput}; unknown sessionUpdate variants are ignored (log once).
+// stopReason values: end_turn | max_tokens | max_turn_requests | refusal | cancelled. Stuck applies only from working.
+// The server never logs request URLs (the WS token travels in ?token=).
 // Errors: { error: string } with 400/401/404/409/500.
 //
 // Auth: every /api/* request and the WebSocket need the token from env TOWER_TOKEN,

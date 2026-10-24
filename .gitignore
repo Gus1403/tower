@@ -5,3 +5,5 @@ dist/
 test-results/
 playwright-report/
 verify/out/
+probes/out/
+probes/node_modules/

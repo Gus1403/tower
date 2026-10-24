@@ -1,0 +1,17 @@
+[Unit]
+Description=Tower - control tower for ACP coding agents
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Code/tower
+EnvironmentFile=%h/.config/tower/env
+ExecStart=/usr/bin/env npx tsx server/src/main.ts
+Restart=on-failure
+RestartSec=3
+# Stop only Tower and the agents it spawned (its own cgroup), never anything else.
+KillMode=control-group
+TimeoutStopSec=10
+
+[Install]
+WantedBy=default.target
