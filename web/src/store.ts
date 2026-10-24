@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from 'react';
-import type { AgentSummary, Capacity, FeedItem, ServerEvent } from '../../shared/contract';
+import type { Account, AgentSummary, Capacity, FeedItem, ServerEvent } from '../../shared/contract';
 
 export interface Toast {
   id: number;
@@ -9,6 +9,7 @@ export interface Toast {
 export interface State {
   agents: Record<string, AgentSummary>;
   capacity: Capacity[];
+  accounts: Account[];
   host: string;
   feeds: Record<string, FeedItem[]>;
   feedLoaded: Record<string, boolean>;
@@ -22,6 +23,7 @@ export interface State {
 let state: State = {
   agents: {},
   capacity: [],
+  accounts: [],
   host: '',
   feeds: {},
   feedLoaded: {},
@@ -72,7 +74,7 @@ export function applyEvent(ev: ServerEvent): void {
     case 'snapshot': {
       const agents: Record<string, AgentSummary> = {};
       for (const a of ev.state.agents) agents[a.id] = a;
-      setState((s) => ({ ...s, agents, capacity: ev.state.capacity, host: ev.state.host }));
+      setState((s) => ({ ...s, agents, capacity: ev.state.capacity, accounts: ev.state.accounts ?? [], host: ev.state.host }));
       return;
     }
     case 'agent':
@@ -87,7 +89,34 @@ export function applyEvent(ev: ServerEvent): void {
     case 'capacity':
       setState((s) => ({ ...s, capacity: ev.capacity }));
       return;
+    case 'accounts':
+      setState((s) => ({ ...s, accounts: ev.accounts }));
+      return;
+    case 'agent_removed':
+      removeAgentLocal(ev.agentId);
+      return;
   }
+}
+
+export function removeAgentLocal(id: string): void {
+  setState((s) => {
+    if (!s.agents[id]) return s;
+    const agents = { ...s.agents };
+    delete agents[id];
+    const feeds = { ...s.feeds };
+    delete feeds[id];
+    return { ...s, agents, feeds, openId: s.openId === id ? null : s.openId };
+  });
+}
+
+/** Optimistically patch an agent summary (the next server 'agent' event wins). */
+export function patchAgentLocal(id: string, p: Partial<AgentSummary>): void {
+  setState((s) => (s.agents[id] ? { ...s, agents: { ...s.agents, [id]: { ...s.agents[id], ...p } } } : s));
+}
+
+export const selectAccounts = (s: State): Account[] => s.accounts;
+export function useAccounts(): Account[] {
+  return useStore(selectAccounts);
 }
 
 /** Merge a fetched full feed with any live items that arrived meanwhile (live ones win). */

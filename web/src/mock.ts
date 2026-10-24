@@ -1,6 +1,8 @@
 // In-browser fake Tower server. Emits contract-shaped ServerEvents over time. Never touches /api.
 import type {
+  Account,
   AgentKind,
+  ConfigOption,
   AgentSummary,
   Capacity,
   FeedItem,
@@ -46,6 +48,40 @@ export function mockTransport(): Transport {
     ];
   };
 
+  const accountsList: Account[] = [
+    { id: 'claude-12', kind: 'claude', label: 'Claude · ~/.claude-12', home: '~/.claude-12', loggedIn: true, plan: 'max', usedPct: 42, detail: '5h window 42% used', running: 0, loginCommand: 'CLAUDE_CONFIG_DIR=~/.claude-12 claude /login' },
+    { id: 'claude-7', kind: 'claude', label: 'Claude · ~/.claude-7', home: '~/.claude-7', loggedIn: false, running: 0, detail: 'Not logged in', loginCommand: 'CLAUDE_CONFIG_DIR=~/.claude-7 claude /login' },
+    { id: 'codex', kind: 'codex', label: 'Codex · ~/.codex', loggedIn: true, plan: 'pro', usedPct: 18, detail: 'Weekly limit 18% used', running: 0, loginCommand: 'codex login' },
+    { id: 'devin', kind: 'devin', label: 'Devin', loggedIn: true, plan: 'Devin Max', running: 0, loginCommand: 'devin auth login' },
+  ];
+  const accounts = (): Account[] =>
+    accountsList.map((acc) => ({
+      ...acc,
+      running: [...agents.values()].filter((a) => a.accountId === acc.id && a.status !== 'stopped' && a.status !== 'error').length,
+    }));
+  const MODES: Record<AgentKind, { id: string; name: string }[]> = {
+    claude: [{ id: 'default', name: 'Default' }, { id: 'acceptEdits', name: 'Accept edits' }, { id: 'plan', name: 'Plan mode' }, { id: 'bypassPermissions', name: 'Bypass permissions' }],
+    codex: [{ id: 'read-only', name: 'Read only' }, { id: 'auto', name: 'Auto' }, { id: 'full-access', name: 'Full access' }],
+    devin: [{ id: 'normal', name: 'Normal' }, { id: 'plan', name: 'Plan' }],
+  };
+  const CONFIG: Record<AgentKind, ConfigOption[]> = {
+    claude: [{ id: 'model', name: 'Model', currentValue: 'opus', options: [{ value: 'opus', name: 'Opus' }, { value: 'sonnet', name: 'Sonnet' }, { value: 'haiku', name: 'Haiku' }] }],
+    codex: [
+      { id: 'model', name: 'Model', currentValue: 'gpt-5-codex', options: [{ value: 'gpt-5-codex', name: 'GPT-5 Codex' }, { value: 'gpt-5', name: 'GPT-5' }] },
+      { id: 'effort', name: 'Effort', currentValue: 'medium', options: [{ value: 'low', name: 'Low effort' }, { value: 'medium', name: 'Medium effort' }, { value: 'high', name: 'High effort' }] },
+    ],
+    devin: [{ id: 'thought_level', name: 'Thought level', currentValue: 'normal', options: [{ value: 'normal', name: 'Normal thinking' }, { value: 'deep', name: 'Deep thinking' }] }],
+  };
+  const ACC: Record<AgentKind, string> = { claude: 'claude-12', codex: 'codex', devin: 'devin' };
+  const defaults = (kind: AgentKind): Pick<AgentSummary, 'queued' | 'modes' | 'mode' | 'configOptions' | 'usage' | 'accountId'> => ({
+    queued: [],
+    modes: MODES[kind],
+    mode: MODES[kind][0].id,
+    configOptions: CONFIG[kind].map((c) => ({ ...c })),
+    usage: { used: 12000 + Math.floor(Math.random() * 60000), size: 200000 },
+    accountId: ACC[kind],
+  });
+
   const put = (a: AgentSummary) => {
     agents.set(a.id, a);
     emit({ type: 'agent', agent: a });
@@ -83,6 +119,7 @@ export function mockTransport(): Transport {
     createdAt: T - ago * 1000,
     lastActivityAt: T - 3000,
     toolCalls: 0,
+    ...defaults(kind),
     ...extra,
   });
 
@@ -99,9 +136,15 @@ export function mockTransport(): Transport {
       feed(id, { ...(it as FeedItem), id: it.id ?? uid('f'), at } as FeedItem, true);
     });
   };
+  const fakeOutput = (title: string, detail?: string) =>
+    title.startsWith('Run')
+      ? `$ ${detail ?? title.slice(4)}\n\n> tower@0.1.0 ${detail ?? ''}\n\n  ✓ 24 passed (1.8s)\n`
+      : title.startsWith('Edit') || title.startsWith('Write')
+        ? `--- a/${(detail ?? '').split(' ')[0]}\n+++ b/${(detail ?? '').split(' ')[0]}\n@@ -1,4 +1,8 @@\n+import { z } from 'zod';\n+\n export function handler() {\n-  return null;\n+  return ok();\n }\n`
+        : `${detail ?? title}\n${Array.from({ length: 30 }, (_, i) => `  line ${i + 1}: …`).join('\n')}`;
   const tc = (title: string, toolKind: string, detail?: string, status: 'completed' | 'failed' = 'completed') => {
     const toolCallId = uid('tc');
-    return { type: 'tool_call' as const, id: `tool-${toolCallId}`, toolCallId, title, toolKind, status, detail };
+    return { type: 'tool_call' as const, id: `tool-${toolCallId}`, toolCallId, title, toolKind, status, detail, output: fakeOutput(title, detail) };
   };
 
   const apiPlan = ['Read existing router setup', 'Add /agents CRUD routes', 'Validate request bodies', 'Write route tests', 'Update OpenAPI spec'];
@@ -274,7 +317,7 @@ export function mockTransport(): Transport {
       ...(withPlan ? [{ plan: 2 } as Step] : []),
       { tool: 'Run npm test', kind: 'execute', detail: 'npm test' },
       ...(withPlan ? [{ plan: 3 } as Step] : []),
-      { say: 'Done. The change is in and the tests pass.' },
+      { say: 'Done. The change is in and the tests pass.\n\n- **Edited** `src/index.ts`\n- Ran `npm test`: *all green*' },
       { end: 'end_turn' },
     ],
   });
@@ -310,7 +353,7 @@ export function mockTransport(): Transport {
       const statuses = ['pending', 'in_progress', 'in_progress', s.fail ? 'failed' : 'completed'] as const;
       if (!r.toolId) r.toolId = uid('tc');
       const status = statuses[r.sub];
-      feed(id, { type: 'tool_call', id: `tool-${r.toolId}`, at: now, toolCallId: r.toolId, title: s.tool, toolKind: s.kind, status, detail: s.detail });
+      feed(id, { type: 'tool_call', id: `tool-${r.toolId}`, at: now, toolCallId: r.toolId, title: s.tool, toolKind: s.kind, status, detail: s.detail, output: status === 'completed' || status === 'failed' ? fakeOutput(s.tool, s.detail) : undefined });
       if (r.sub === 0) patch(id, { toolCalls: a.toolCalls + 1, lastMessage: s.tool });
       else patch(id, {});
       r.sub++;
@@ -323,13 +366,41 @@ export function mockTransport(): Transport {
       next();
     } else if ('end' in s) {
       feed(id, { type: 'status', id: uid('st'), at: now, text: `Turn ended: ${s.end}` });
-      patch(id, { status: 'done', stopReason: s.end });
       runners.delete(id);
+      endTurn(id, s.end);
     }
+  };
+
+  const startTurn = (id: string, text: string, rest: string[]) => {
+    feed(id, { type: 'user_message', id: uid('u'), at: Date.now(), text });
+    const a = agents.get(id)!;
+    patch(id, { status: 'working', stopReason: undefined, queued: rest, usage: a.usage && { ...a.usage, used: Math.min(a.usage.size, a.usage.used + 6000) } });
+    runners.set(id, replyScript(text, false));
+  };
+  const endTurn = (id: string, reason: string) => {
+    const a = agents.get(id);
+    if (!a) return;
+    const [next, ...rest] = a.queued ?? [];
+    if (next !== undefined) {
+      patch(id, { status: 'done', stopReason: reason, pendingPermission: undefined });
+      setTimeout(() => startTurn(id, next, rest), 300);
+    } else patch(id, { status: 'done', stopReason: reason, pendingPermission: undefined });
   };
 
   const tick = () => {
     for (const id of [...runners.keys()]) step(id);
+  };
+
+  const cancelTurn = (id: string) => {
+    const a = agents.get(id);
+    if (!a || (a.status !== 'working' && a.status !== 'needs_you' && a.status !== 'starting')) return;
+    runners.delete(id);
+    if (a.pendingPermission) {
+      const p = a.pendingPermission;
+      feed(id, { type: 'permission', id: `perm-${p.requestId}`, at: p.createdAt, requestId: p.requestId, title: p.title, resolution: 'cancelled' });
+    }
+    feed(id, { type: 'status', id: uid('st'), at: Date.now(), text: 'Turn ended: cancelled' });
+    endTurn(id, 'cancelled');
   };
 
   const fail = (msg: string) => Promise.reject(new Error(msg));
@@ -340,7 +411,7 @@ export function mockTransport(): Transport {
       emit = onEvent;
       setTimeout(() => {
         onStatus(true);
-        onEvent({ type: 'snapshot', state: { agents: [...agents.values()], capacity: capacity(), host: 'eva-forge' } });
+        onEvent({ type: 'snapshot', state: { agents: [...agents.values()], capacity: capacity(), accounts: accounts(), host: 'eva-forge' } });
         setInterval(tick, 650);
       }, 0);
     },
@@ -364,9 +435,12 @@ export function mockTransport(): Transport {
         lastActivityAt: Date.now(),
         toolCalls: 0,
         model: req.model,
+        ...defaults(req.kind),
+        accountId: req.accountId && req.accountId !== 'auto' ? req.accountId : ACC[req.kind],
       };
       put(a);
       emit({ type: 'capacity', capacity: capacity() });
+      emit({ type: 'accounts', accounts: accounts() });
       feed(id, { type: 'status', id: uid('st'), at: Date.now(), text: 'Started' });
       setTimeout(() => {
         feed(id, { type: 'user_message', id: uid('u'), at: Date.now(), text: a.task });
@@ -379,15 +453,75 @@ export function mockTransport(): Transport {
       }, 900);
       return delay({ ...a }, 120);
     },
-    prompt(id, text) {
+    prompt(id, text, interrupt) {
       const a = agents.get(id);
       if (!a) return fail('No such agent');
-      if (a.status === 'working' || a.status === 'needs_you' || a.status === 'starting') return fail('Agent is busy');
-      if (a.source === 'tmux') return fail('Observed agents are read-only');
-      feed(id, { type: 'user_message', id: uid('u'), at: Date.now(), text });
-      patch(id, { status: 'working', stopReason: undefined });
-      runners.set(id, replyScript(text, false));
+      if (a.source === 'tmux' || a.status === 'observed') return fail('Observed agents are read-only');
+      if (a.status === 'stopped' || a.status === 'error') return fail(`Agent is ${a.status}`);
+      const busy = a.status === 'working' || a.status === 'needs_you' || a.status === 'starting';
+      if (!busy) {
+        startTurn(id, text, a.queued ?? []);
+        return delay({ queued: false }, 80);
+      }
+      if (interrupt) {
+        patch(id, { queued: [text, ...(a.queued ?? [])] });
+        setTimeout(() => cancelTurn(id), 250);
+      } else patch(id, { queued: [...(a.queued ?? []), text] });
+      return delay({ queued: true }, 80);
+    },
+    interrupt(id) {
+      const a = agents.get(id);
+      if (!a) return fail('No such agent');
+      cancelTurn(id);
       return delay(undefined, 80);
+    },
+    setMode(id, modeId) {
+      const a = agents.get(id);
+      if (!a) return fail('No such agent');
+      if (!a.modes?.some((m) => m.id === modeId)) return fail('Mode not offered');
+      patch(id, { mode: modeId });
+      return delay(undefined, 80);
+    },
+    setConfig(id, configId, value) {
+      const a = agents.get(id);
+      if (!a) return fail('No such agent');
+      const opts = a.configOptions ?? [];
+      if (!opts.some((o) => o.id === configId)) return fail('No such option');
+      patch(id, {
+        configOptions: opts.map((o) => (o.id === configId ? { ...o, currentValue: value } : o)),
+        ...(configId === 'model' ? { model: value } : {}),
+      });
+      return delay(undefined, 80);
+    },
+    removeQueued(id, index) {
+      const a = agents.get(id);
+      if (!a) return fail('No such agent');
+      const q = a.queued ?? [];
+      if (index < 0 || index >= q.length) return fail('No such queued prompt');
+      patch(id, { queued: q.filter((_, i) => i !== index) });
+      return delay(undefined, 60);
+    },
+    resume(id) {
+      const a = agents.get(id);
+      if (!a || !a.resumable) return fail('Not resumable');
+      feed(id, { type: 'status', id: uid('st'), at: Date.now(), text: 'Resumed' });
+      patch(id, { status: 'done', resumable: false, stopReason: undefined });
+      return delay(undefined, 120);
+    },
+    remove(id) {
+      const a = agents.get(id);
+      if (!a) return fail('No such agent');
+      if (a.source !== 'tower') return fail('Only tower agents can be removed');
+      runners.delete(id);
+      agents.delete(id);
+      feeds.delete(id);
+      emit({ type: 'agent_removed', agentId: id });
+      emit({ type: 'capacity', capacity: capacity() });
+      emit({ type: 'accounts', accounts: accounts() });
+      return delay(undefined, 80);
+    },
+    accounts() {
+      return delay(accounts(), 80);
     },
     permission(id, requestId, optionId) {
       const a = agents.get(id);

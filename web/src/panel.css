@@ -1,0 +1,70 @@
+/* Panel Wave A: control bar, queue chips, expandable tool rows, markdown. Uses styles.css tokens. */
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+.ctrl { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 10px; min-width: 0; }
+.ctrl-sel { min-width: 0; max-width: 100%; }
+.ctrl select {
+  appearance: none; -webkit-appearance: none; font: inherit; font-size: 12px; color: var(--text-2);
+  background: #f5f5f4 url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='5'%3E%3Cpath d='M0 0l4 5 4-5z' fill='%23a8a29e'/%3E%3C/svg%3E") no-repeat right 8px center;
+  border: 1px solid transparent; border-radius: 7px; padding: 4px 22px 4px 8px; max-width: 180px;
+  text-overflow: ellipsis; cursor: pointer;
+}
+.ctrl select:hover { border-color: var(--border); background-color: #efeeed; }
+.ctrl select:focus { outline: none; border-color: var(--border-strong); }
+.ctx { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; font-size: 11.5px; color: var(--text-3); flex: none; }
+.ctx-bar { width: 56px; height: 4px; border-radius: 4px; background: #eeedec; overflow: hidden; }
+.ctx-fill { display: block; height: 100%; background: var(--text-3); border-radius: 4px; transition: width 0.3s; }
+.ctx-fill.hot { background: var(--amber); }
+
+.more { position: relative; }
+.more-menu {
+  position: absolute; right: 0; top: calc(100% + 4px); z-index: 20; min-width: 150px; padding: 4px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow-lg);
+}
+.more-menu button { display: block; width: 100%; text-align: left; font: inherit; font-size: 13px; padding: 7px 10px; border: 0; background: none; border-radius: 6px; cursor: pointer; color: var(--text); }
+.more-menu button:hover { background: #f5f5f4; }
+.more-menu .more-danger { color: var(--red); }
+
+/* composer */
+.composer-wrap { border-top: 1px solid var(--border); }
+.composer-wrap .composer { border-top: 0; }
+.composer .c-queue, .composer .c-interrupt { height: 38px; flex: none; white-space: nowrap; }
+.composer-resume { align-items: center; justify-content: space-between; font-size: 13px; }
+.queue { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 10px 16px 0; min-width: 0; }
+.queue-label { font-size: 11px; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.04em; }
+.qchip {
+  display: inline-flex; align-items: center; gap: 2px; max-width: 100%; min-width: 0;
+  background: #f5f5f4; border: 1px solid var(--border); border-radius: 999px; padding: 2px 4px 2px 10px; font-size: 12px; color: var(--text-2);
+}
+.qchip-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
+.qchip-x { border: 0; background: none; cursor: pointer; color: var(--text-3); font-size: 14px; line-height: 1; width: 18px; height: 18px; border-radius: 50%; padding: 0; }
+.qchip-x:hover { background: #e7e5e4; color: var(--text); }
+
+/* tool rows */
+.f-toolwrap { display: block; }
+button.f-tool { width: 100%; font: inherit; text-align: left; cursor: pointer; color: inherit; }
+button.f-tool:hover { border-color: var(--border-strong); }
+.f-toolwrap.open button.f-tool { border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
+.f-tool-out { border: 1px solid var(--border); border-top: 0; border-radius: 0 0 10px 10px; background: #fafaf9; padding: 8px 10px; }
+.f-tool-out-detail { font-family: var(--mono); font-size: 11.5px; color: var(--text-2); margin-bottom: 6px; word-break: break-all; }
+.f-tool-out pre { margin: 0; font-family: var(--mono); font-size: 11.5px; line-height: 1.5; max-height: 260px; overflow: auto; white-space: pre-wrap; word-break: break-word; color: var(--text); }
+
+/* markdown */
+.f-agent .md { white-space: normal; }
+.md > * + * { margin-top: 8px; }
+.md-p { margin: 0; }
+.md-h { font-weight: 600; }
+.md-list { margin: 0; padding-left: 20px; }
+.md-list li + li { margin-top: 2px; }
+.md-code { font-family: var(--mono); font-size: 0.88em; background: #f5f5f4; border-radius: 4px; padding: 1px 4px; }
+.md-pre { margin: 0; font-family: var(--mono); font-size: 12px; background: #f5f5f4; border-radius: 8px; padding: 10px 12px; overflow-x: auto; white-space: pre; }
+.md a { color: var(--blue); text-decoration: none; }
+.md a:hover { text-decoration: underline; }
+
+@media (max-width: 640px) {
+  .panel-row { flex-wrap: wrap; row-gap: 6px; }
+  .panel-row .panel-name { flex: 1 1 100%; order: 10; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ctrl select { max-width: 140px; }
+  .qchip-text { max-width: 200px; }
+  .composer .c-interrupt { padding: 0 8px; font-size: 12px; }
+}

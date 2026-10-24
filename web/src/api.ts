@@ -1,10 +1,17 @@
-import type { AgentSummary, FeedItem, LaunchRequest, ServerEvent } from '../../shared/contract';
+import type { Account, AgentSummary, FeedItem, LaunchRequest, ServerEvent } from '../../shared/contract';
 import { applyEvent, getState, setFetchedFeed, setState } from './store';
 
 export interface Transport {
   fetchFeed(id: string): Promise<FeedItem[]>;
   launch(req: LaunchRequest): Promise<AgentSummary>;
-  prompt(id: string, text: string): Promise<void>;
+  prompt(id: string, text: string, interrupt?: boolean): Promise<{ queued: boolean }>;
+  interrupt(id: string): Promise<void>;
+  setMode(id: string, modeId: string): Promise<void>;
+  setConfig(id: string, configId: string, value: string): Promise<void>;
+  removeQueued(id: string, index: number): Promise<void>;
+  resume(id: string): Promise<void>;
+  remove(id: string): Promise<void>;
+  accounts(): Promise<Account[]>;
   permission(id: string, requestId: string, optionId: string): Promise<void>;
   stop(id: string): Promise<void>;
   connect(onEvent: (ev: ServerEvent) => void, onStatus: (connected: boolean) => void): void;
@@ -43,7 +50,15 @@ function realTransport(): Transport {
   return {
     fetchFeed: (id) => req<FeedItem[]>('GET', `/api/agents/${encodeURIComponent(id)}/feed`),
     launch: (r) => req<AgentSummary>('POST', '/api/agents', r),
-    prompt: (id, text) => req<void>('POST', `/api/agents/${encodeURIComponent(id)}/prompt`, { text }),
+    prompt: (id, text, interrupt) =>
+      req<{ queued: boolean }>('POST', `/api/agents/${encodeURIComponent(id)}/prompt`, interrupt ? { text, interrupt: true } : { text }),
+    interrupt: (id) => req<void>('POST', `/api/agents/${encodeURIComponent(id)}/interrupt`),
+    setMode: (id, modeId) => req<void>('POST', `/api/agents/${encodeURIComponent(id)}/mode`, { modeId }),
+    setConfig: (id, configId, value) => req<void>('POST', `/api/agents/${encodeURIComponent(id)}/config`, { configId, value }),
+    removeQueued: (id, index) => req<void>('DELETE', `/api/agents/${encodeURIComponent(id)}/queue/${index}`),
+    resume: (id) => req<void>('POST', `/api/agents/${encodeURIComponent(id)}/resume`),
+    remove: (id) => req<void>('DELETE', `/api/agents/${encodeURIComponent(id)}`),
+    accounts: () => req<Account[]>('GET', '/api/accounts'),
     permission: (id, requestId, optionId) =>
       req<void>('POST', `/api/agents/${encodeURIComponent(id)}/permission`, { requestId, optionId }),
     stop: (id) => req<void>('POST', `/api/agents/${encodeURIComponent(id)}/stop`),
@@ -116,7 +131,14 @@ export async function loadFeed(id: string, force = false): Promise<void> {
 
 export const api = {
   launch: (r: LaunchRequest) => transport.launch(r),
-  prompt: (id: string, text: string) => transport.prompt(id, text),
+  prompt: (id: string, text: string, interrupt?: boolean) => transport.prompt(id, text, interrupt),
+  interrupt: (id: string) => transport.interrupt(id),
+  setMode: (id: string, modeId: string) => transport.setMode(id, modeId),
+  setConfig: (id: string, configId: string, value: string) => transport.setConfig(id, configId, value),
+  removeQueued: (id: string, index: number) => transport.removeQueued(id, index),
+  resume: (id: string) => transport.resume(id),
+  remove: (id: string) => transport.remove(id),
+  accounts: () => transport.accounts(),
   permission: (id: string, requestId: string, optionId: string) => transport.permission(id, requestId, optionId),
   stop: (id: string) => transport.stop(id),
 };

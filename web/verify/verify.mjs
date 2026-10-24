@@ -95,8 +95,19 @@ try {
   await page.waitForTimeout(2600);
   ok((await page.locator('.panel .plan li').count()) === 5, 'panel shows the plan checklist');
   ok((await page.locator('.panel .f-tool').count()) >= 5, 'panel feed shows tool calls');
-  ok((await page.locator('.panel .composer textarea').isDisabled()), 'composer disabled while working');
+  ok(!(await page.locator('.panel .composer textarea').isDisabled()), 'composer enabled while working');
+  ok((await page.locator('.panel .composer button', { hasText: 'Queue' }).count()) === 1, 'composer shows Queue while working');
+  // change mode
+  await page.locator('.panel select.sel-mode').selectOption('plan');
+  await page.waitForTimeout(200);
+  ok((await page.locator('.panel select.sel-mode').inputValue()) === 'plan', 'mode select changes mode');
+  ok((await page.locator('.panel .ctx-label').innerText()).includes('% context'), 'context bar shows % context');
+  // expand a tool call
+  await page.locator('.panel button.f-tool').first().click();
+  await page.waitForSelector('.panel .f-tool-out pre');
+  ok((await page.locator('.panel .f-tool-out pre').first().innerText()).length > 0, 'tool call expands to show output');
   await shot(page, 'b-desktop-panel');
+  await shot(page, 'wa-desktop-panel');
 
   // stop it, then prompt
   await page.locator('.panel button', { hasText: 'Stop' }).click();
@@ -111,6 +122,15 @@ try {
   await page.keyboard.press('Enter');
   await page.waitForSelector('.panel .status-working');
   ok((await page.locator('.panel .bubble', { hasText: 'troubleshooting' }).count()) === 1, 'prompt shows as user bubble and agent goes working');
+  // queue while working
+  await page.locator('.panel .composer textarea').fill('Also add an FAQ');
+  await page.keyboard.press('Enter');
+  await page.waitForSelector('.panel .qchip', { timeout: 1000 });
+  ok((await page.locator('.panel .qchip', { hasText: 'FAQ' }).count()) === 1, 'queued chip appears while working');
+  await shot(page, 'wa-desktop-queued');
+  await page.waitForSelector('.panel .qchip', { state: 'detached', timeout: 30000 });
+  await page.waitForSelector('.panel .bubble:has-text("Also add an FAQ")', { timeout: 3000 });
+  ok(true, 'after the turn ends the chip disappears and a user bubble shows');
   await page.keyboard.press('Escape');
 
   // new agent dialog + launch
@@ -146,6 +166,10 @@ try {
   await p.waitForSelector('.panel .f-tool');
   await p.waitForTimeout(2000);
   await shot(p, 'e-phone-sheet');
+  await p.locator('.panel .composer textarea').fill('Queue this on the phone please');
+  await p.keyboard.press('Enter');
+  await p.waitForSelector('.panel .qchip');
+  await shot(p, 'wa-phone-panel');
   await pctx.close();
 } finally {
   await browser.close();
