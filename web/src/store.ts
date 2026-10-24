@@ -49,7 +49,7 @@ export function setState(fn: (s: State) => State): void {
   listeners.forEach((l) => l());
 }
 
-function subscribe(l: () => void): () => void {
+export function subscribe(l: () => void): () => void {
   listeners.add(l);
   return () => listeners.delete(l);
 }

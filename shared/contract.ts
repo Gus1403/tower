@@ -72,6 +72,7 @@ export interface AgentSummary {
   archived?: boolean; // hidden from the board, listed under Archived
   limitHit?: boolean; // the last error/stop looked like a usage limit (429, quota, "limit") -> offer "Continue on another account"
   interactive?: boolean; // tmux cards only: true when TOWER_TMUX_INTERACTIVE=1 (send/key/screen allowed)
+  movedFrom?: { agentId: string; accountId?: string }; // Wave C: set on the agent created by move / auto-rotate
 }
 
 export interface Question {
@@ -108,6 +109,26 @@ export interface Account {
   detail?: string; // one line, no emails
   running: number; // tower agents launched with this account and not stopped/error
   loginCommand: string; // exact shell command the owner runs to log this account in
+  // ---- Wave C (rotation) ----
+  status?: 'ok' | 'exhausted' | 'excluded' | 'logged_out'; // server-computed, persisted (exhausted/excluded)
+  resetAt?: number; // epoch ms when an exhausted account is expected back (auto-clears then)
+  excluded?: boolean; // owner excluded it from Automatic + auto-rotate
+}
+
+export interface RotationState {
+  autoRotate: boolean; // default true: on limitHit, move the agent to the next ok account of its kind
+  activity: ActivityEntry[]; // newest first, max 200, persisted
+}
+
+export interface ActivityEntry {
+  id: string;
+  at: number;
+  kind: 'limit_hit' | 'moved' | 'cleared' | 'excluded' | 'included' | 'no_account';
+  accountId?: string;
+  toAccountId?: string;
+  agentId?: string;
+  newAgentId?: string;
+  text: string; // one human line, e.g. "Claude · ~/.claude-3 hit its limit; resets 17:40"
 }
 
 export type FeedItem =
@@ -149,6 +170,7 @@ export interface StateResponse {
   capacity: Capacity[];
   accounts: Account[];
   notes: Note[];
+  rotation?: RotationState; // Wave C
   host: string; // os.hostname()
 }
 
@@ -184,6 +206,11 @@ export interface StateResponse {
 // DELETE /api/notes/:id -> 200 · POST /api/notes/:id/start { kind, accountId? } -> 201 AgentSummary (task = title + body)
 // Agent CLI `tower ask [--recommendation "…"] "question"`: talks to the unix socket ~/.local/state/tower/agent.sock
 //      (mode 600, no token); identifies the agent by env TOWER_AGENT_ID (set by the server for every agent it spawns).
+// ---- Wave C (rotation) ----
+// POST /api/accounts/:id/clear            -> 200: exhausted -> ok (activity 'cleared')
+// POST /api/accounts/:id/exclude          body { excluded: boolean } -> 200 (activity 'excluded' / 'included')
+// POST /api/rotation                      body { autoRotate: boolean } -> 200 RotationState
+// WS { type: 'rotation'; rotation: RotationState } on every change; accounts changes still go out as 'accounts'.
 // POST /api/agents/:id/permission         body { requestId: string; optionId: string } -> 200 (404 if no such pending request)
 //      ACP reply is nested: { outcome: { outcome: 'selected', optionId } }
 // POST /api/agents/:id/stop               -> 200: (a) answer any pending permission { outcome: { outcome: 'cancelled' } },
@@ -218,4 +245,5 @@ export type ServerEvent =
   | { type: 'capacity'; capacity: Capacity[] }
   | { type: 'accounts'; accounts: Account[] }
   | { type: 'agent_removed'; agentId: string }
-  | { type: 'notes'; notes: Note[] };
+  | { type: 'notes'; notes: Note[] }
+  | { type: 'rotation'; rotation: RotationState };

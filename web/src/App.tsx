@@ -9,6 +9,17 @@ import { Panel } from './Panel';
 import { getState, openAgent, setLaunchOpen, useStore } from './store';
 import { TmuxPanel } from './TmuxPanel';
 import { Inbox, TopBar } from './ui';
+import { QuestionsInbox } from './Questions';
+import { initNotifications } from './notify';
+import { subscribe } from './store';
+
+initNotifications(
+  () =>
+    Object.values(getState().agents)
+      .filter((a) => a.status === 'needs_you')
+      .map((a) => ({ id: a.id, name: a.name, title: a.pendingPermission?.title ?? a.questions?.[0]?.text ?? a.lastMessage ?? '' })),
+  subscribe,
+);
 
 type Col = 'working' | 'needs' | 'stuck' | 'done';
 type Tab = Col | 'notes';
@@ -190,6 +201,7 @@ export function App() {
       <main className="main">
         <SearchBox ref={searchRefPhone} value={q} onChange={setQ} className="search-phone" />
         <Inbox />
+        <QuestionsInbox />
         {q && order.length === 0 && archived.length === 0 && <p className="search-empty">Nothing matches “{q}”.</p>}
         {total === 0 && allNotes.length === 0 && everConnected && !q ? (
           <div className="empty">
