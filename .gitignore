@@ -7,3 +7,4 @@ playwright-report/
 verify/out/
 probes/out/
 probes/node_modules/
+probes/work/
