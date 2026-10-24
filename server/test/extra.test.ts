@@ -155,10 +155,15 @@ test('upload over 20 MB -> 413 (declared length and chunked stream), nothing lef
       if (!answered) reject(e);
     });
     const chunk = Buffer.alloc(1024 * 1024, 2);
-    let n = 0;
+    let sent = 0;
     const pump = () => {
-      while (!answered && n < 21 && req.write(chunk)) n++;
-      if (!answered && n < 21) req.once('drain', () => (n++, pump()));
+      while (!answered && sent < MAX_UPLOAD_BYTES) {
+        sent += chunk.length;
+        if (!req.write(chunk)) { req.once('drain', pump); return; }
+      }
+      // Cross the streaming boundary by one byte, then finish the request. Continuing
+      // to write a megabyte after rejection races the server's intentional close.
+      if (!answered) req.end(Buffer.from([2]));
     };
     pump();
   });
