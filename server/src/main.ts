@@ -5,6 +5,7 @@ import { createServer } from './http.js';
 import { startAgentSocket } from './agent-socket.js';
 import { createAccounts } from './accounts.js';
 import { createStore } from './store.js';
+import { createRotation } from './rotation.js';
 
 const token = process.env.TOWER_TOKEN;
 if (!token) {
@@ -22,7 +23,7 @@ const stuckMs = Number(process.env.TOWER_STUCK_MS || 300000);
 process.on('unhandledRejection', (err) => console.error('[tower] unhandledRejection:', err));
 process.on('uncaughtException', (err) => console.error('[tower] uncaughtException:', err));
 
-const accounts = createAccounts();
+const accounts = createRotation(createAccounts());
 const store = createStore();
 const manager = new AgentManager({
   workDir,
@@ -31,6 +32,7 @@ const manager = new AgentManager({
   store,
   notesFile: path.join(towerDataDir(), 'notes.json'),
 });
+accounts.attach(manager);
 const server = createServer(manager, token);
 const closeAgentSocket = startAgentSocket(manager);
 accounts.start(
@@ -47,6 +49,7 @@ const shutdown = async () => {
   manager.shutdown();
   closeAgentSocket();
   accounts.stop();
+  accounts.close();
   manager.saveNow();
   await manager.stopAll();
   manager.saveNow();

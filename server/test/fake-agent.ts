@@ -1,5 +1,6 @@
 // Fake ACP agent for tests: a real ACP peer over stdio.
-// Modes via env FAKE_MODE: normal (default) | silent | crash
+// Modes via env FAKE_MODE: normal (default) | silent | crash | slow | limit
+// limit = slow, but a prompt starting with 'limit-me' fails with Claude's usage-limit banner (stderr + error)
 import * as acp from '@agentclientprotocol/sdk';
 import { Readable, Writable } from 'node:stream';
 
@@ -102,13 +103,19 @@ const agent: acp.Agent = {
     }
     const upd = (update: acp.SessionUpdate) =>
       conn.sessionUpdate({ sessionId, update }).catch(() => {});
-    if (mode === 'slow') {
+    if (mode === 'slow' || mode === 'limit') {
       sess.cancelled = false;
       const text = params.prompt.map((b) => (b.type === 'text' ? b.text : '')).join('');
       await upd({
         sessionUpdate: 'available_commands_update',
         availableCommands: [{ name: 'review', description: 'Review the diff', input: null }],
       } as acp.SessionUpdate);
+      if (mode === 'limit' && text.startsWith('limit-me')) {
+        const banner = process.env.FAKE_LIMIT_BANNER || "You've hit your usage limit · resets 13:41";
+        console.error(banner);
+        await sleep(100);
+        throw new Error(banner);
+      }
       if (text === 'fail-limit') {
         console.error('fake-agent: You hit your usage limit (429)');
         await sleep(300);

@@ -18,6 +18,7 @@ import type {
   Note,
   Question,
   StateResponse,
+  RotationState,
   LaunchRequest,
   PermissionRequest,
   PlanEntry,
@@ -28,7 +29,13 @@ import { getUpload } from './uploads.js';
 export function towerDataDir(): string {
   return process.env.TOWER_DATA_DIR || path.join(os.homedir(), '.local', 'state', 'tower');
 }
-const LIMIT_RE = /usage limit|rate limit|429|quota|limit reached|hit your limit/i;
+const LIMIT_RE = /usage limit|rate limit|429|quota|limit reached|hit your limit|you(?:'|’)ve (?:hit|reached) your [^\n]{0,60}?limit|usage_limit_reached/i;
+
+// Wave C: injected by rotation.ts (createRotation(...).attach(manager)); optional so the manager works without it.
+export interface RotationHooks {
+  onLimit(agentId: string, accountId: string | undefined, text: string): void;
+  state(): RotationState;
+}
 const CANCEL_FORCE_MS = 5000;
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -198,6 +205,7 @@ export class AgentManager extends EventEmitter {
   private saveTimer?: NodeJS.Timeout;
   private notes: Note[] = [];
   private notesFile?: string;
+  rotation?: RotationHooks; // Wave C
 
   constructor(opts: {
     workDir: string;
@@ -281,7 +289,14 @@ export class AgentManager extends EventEmitter {
 
   private noteLimit(e: AgentEntry, text: string) {
     const tail = e.stderr.slice(-20).join('\n');
-    if (LIMIT_RE.test(text) || LIMIT_RE.test(tail)) e.summary.limitHit = true;
+    if (LIMIT_RE.test(text) || LIMIT_RE.test(tail)) {
+      e.summary.limitHit = true;
+      const r = this.rotation;
+      const id = e.summary.id;
+      const acc = e.summary.accountId;
+      // deferred: the caller sets status 'error' right after this returns
+      if (r) setTimeout(() => r.onLimit(id, acc, `${text}\n${tail}`), 0);
+    }
   }
 
   private setStatus(e: AgentEntry, s: AgentStatus, extra?: Partial<AgentSummary>) {
@@ -1315,6 +1330,7 @@ export class AgentManager extends EventEmitter {
       accounts: this.listAccounts(),
       notes: this.listNotes(),
       host,
+      rotation: this.rotation?.state(),
     };
   }
 
@@ -1393,6 +1409,11 @@ export class AgentManager extends EventEmitter {
       });
     } catch {
       return { ok: false, error: 'unknown_account' };
+    }
+    const ne = this.agents.get(agent.id);
+    if (ne) {
+      ne.summary = { ...ne.summary, movedFrom: { agentId, accountId: e.summary.accountId } };
+      this.emitAgent(ne);
     }
     const st = e.summary.status;
     if (st !== 'stopped' && st !== 'error') await this.stopEntry(e);

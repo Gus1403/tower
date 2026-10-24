@@ -4,6 +4,7 @@ import type http from 'node:http';
 import type { ServerEvent } from '../../shared/contract.js';
 import type { AgentManager } from './agents.js';
 import { saveUpload } from './uploads.js';
+import type { Rotation } from './rotation.js';
 import { ALLOWED_KEYS, MAX_SEND_CHARS, formatTarget, tmuxKey, tmuxScreen, tmuxSend } from './tmux-control.js';
 
 export interface ExtraCtx {
@@ -22,6 +23,41 @@ type Mgr = Pick<AgentManager, 'getAgent'> & { tmuxTarget?(agentId: string): stri
 
 export async function handleExtra(ctx: ExtraCtx): Promise<boolean> {
   const { req, res, path: p, url, json } = ctx;
+  const rot = (ctx.manager as { rotation?: unknown }).rotation as Rotation | undefined;
+  rot?.bindSend?.(ctx.send);
+
+  // ---- Wave C: rotation routes ----
+  if (rot && req.method === 'POST') {
+    const ma = p.match(/^\/api\/accounts\/([^/]+)\/(clear|exclude)$/);
+    if (ma || p === '/api/rotation') {
+      let body: { excluded?: unknown; autoRotate?: unknown } = {};
+      if (!ma || ma[2] === 'exclude') {
+        try {
+          body = ((await ctx.readBody(req)) ?? {}) as typeof body;
+        } catch {
+          json(res, 400, { error: 'invalid JSON' });
+          return true;
+        }
+      }
+      if (!ma) {
+        if (typeof body.autoRotate !== 'boolean') {
+          json(res, 400, { error: 'autoRotate must be a boolean' });
+          return true;
+        }
+        json(res, 200, rot.setAutoRotate(body.autoRotate));
+        return true;
+      }
+      const id = decodeURIComponent(ma[1]!);
+      if (ma[2] === 'exclude' && typeof body.excluded !== 'boolean') {
+        json(res, 400, { error: 'excluded must be a boolean' });
+        return true;
+      }
+      const acc = ma[2] === 'clear' ? rot.clear(id) : rot.setExcluded(id, body.excluded as boolean);
+      if (!acc) json(res, 404, { error: 'account not found' });
+      else json(res, 200, acc);
+      return true;
+    }
+  }
 
   if (req.method === 'POST' && p === '/api/uploads') {
     const r = await saveUpload(req, url.searchParams.get('name'));
