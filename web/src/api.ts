@@ -1,10 +1,24 @@
-import type { Account, AgentSummary, FeedItem, LaunchRequest, ServerEvent } from '../../shared/contract';
+import type { Account, AgentKind, AgentSummary, FeedItem, LaunchRequest, Note, ServerEvent } from '../../shared/contract';
 import { applyEvent, getState, setFetchedFeed, setState } from './store';
+
+export interface Upload {
+  id: string;
+  name: string;
+  size: number;
+}
 
 export interface Transport {
   fetchFeed(id: string): Promise<FeedItem[]>;
   launch(req: LaunchRequest): Promise<AgentSummary>;
-  prompt(id: string, text: string, interrupt?: boolean): Promise<{ queued: boolean }>;
+  prompt(id: string, text: string, interrupt?: boolean, attachments?: string[]): Promise<{ queued: boolean }>;
+  answer(id: string, questionId: string, text: string): Promise<void>;
+  move(id: string, accountId: string): Promise<AgentSummary>;
+  archive(id: string, archived: boolean): Promise<void>;
+  upload(file: File): Promise<Upload>;
+  createNote(title: string, body: string): Promise<Note>;
+  updateNote(id: string, p: { title?: string; body?: string; archived?: boolean }): Promise<Note>;
+  deleteNote(id: string): Promise<void>;
+  startNote(id: string, kind: AgentKind, accountId?: string): Promise<AgentSummary>;
   interrupt(id: string): Promise<void>;
   setMode(id: string, modeId: string): Promise<void>;
   setConfig(id: string, configId: string, value: string): Promise<void>;
@@ -50,8 +64,31 @@ function realTransport(): Transport {
   return {
     fetchFeed: (id) => req<FeedItem[]>('GET', `/api/agents/${encodeURIComponent(id)}/feed`),
     launch: (r) => req<AgentSummary>('POST', '/api/agents', r),
-    prompt: (id, text, interrupt) =>
-      req<{ queued: boolean }>('POST', `/api/agents/${encodeURIComponent(id)}/prompt`, interrupt ? { text, interrupt: true } : { text }),
+    prompt: (id, text, interrupt, attachments) =>
+      req<{ queued: boolean }>('POST', `/api/agents/${encodeURIComponent(id)}/prompt`, {
+        text,
+        ...(interrupt ? { interrupt: true } : {}),
+        ...(attachments && attachments.length ? { attachments } : {}),
+      }),
+    answer: (id, questionId, text) => req<void>('POST', `/api/agents/${encodeURIComponent(id)}/answer`, { questionId, text }),
+    move: (id, accountId) => req<AgentSummary>('POST', `/api/agents/${encodeURIComponent(id)}/move`, { accountId }),
+    archive: (id, archived) => req<void>('POST', `/api/agents/${encodeURIComponent(id)}/archive`, { archived }),
+    async upload(file) {
+      const res = await fetch(`/api/uploads?name=${encodeURIComponent(file.name || 'file')}`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': file.type || 'application/octet-stream' },
+        body: file,
+      });
+      const text = await res.text();
+      const data = text ? JSON.parse(text) : undefined;
+      if (!res.ok) throw new Error((data && data.error) || `HTTP ${res.status}`);
+      return data as Upload;
+    },
+    createNote: (title, body) => req<Note>('POST', '/api/notes', { title, body }),
+    updateNote: (id, p) => req<Note>('PATCH', `/api/notes/${encodeURIComponent(id)}`, p),
+    deleteNote: (id) => req<void>('DELETE', `/api/notes/${encodeURIComponent(id)}`),
+    startNote: (id, kind, accountId) =>
+      req<AgentSummary>('POST', `/api/notes/${encodeURIComponent(id)}/start`, accountId ? { kind, accountId } : { kind }),
     interrupt: (id) => req<void>('POST', `/api/agents/${encodeURIComponent(id)}/interrupt`),
     setMode: (id, modeId) => req<void>('POST', `/api/agents/${encodeURIComponent(id)}/mode`, { modeId }),
     setConfig: (id, configId, value) => req<void>('POST', `/api/agents/${encodeURIComponent(id)}/config`, { configId, value }),
@@ -131,7 +168,21 @@ export async function loadFeed(id: string, force = false): Promise<void> {
 
 export const api = {
   launch: (r: LaunchRequest) => transport.launch(r),
-  prompt: (id: string, text: string, interrupt?: boolean) => transport.prompt(id, text, interrupt),
+  prompt: (id: string, text: string, interrupt?: boolean, attachments?: string[]) => transport.prompt(id, text, interrupt, attachments),
+  answer: (id: string, questionId: string, text: string) => transport.answer(id, questionId, text),
+  move: (id: string, accountId: string) => transport.move(id, accountId),
+  archive: (id: string, archived: boolean) => transport.archive(id, archived),
+  upload: (file: File) => transport.upload(file),
+  notes: {
+    create: (title: string, body: string) => transport.createNote(title, body),
+    update: (id: string, p: { title?: string; body?: string; archived?: boolean }) => transport.updateNote(id, p),
+    remove: (id: string) => transport.deleteNote(id),
+    start: (id: string, kind: AgentKind, accountId?: string) => transport.startNote(id, kind, accountId),
+  },
+  createNote: (title: string, body: string) => transport.createNote(title, body),
+  updateNote: (id: string, p: { title?: string; body?: string; archived?: boolean }) => transport.updateNote(id, p),
+  deleteNote: (id: string) => transport.deleteNote(id),
+  startNote: (id: string, kind: AgentKind, accountId?: string) => transport.startNote(id, kind, accountId),
   interrupt: (id: string) => transport.interrupt(id),
   setMode: (id: string, modeId: string) => transport.setMode(id, modeId),
   setConfig: (id: string, configId: string, value: string) => transport.setConfig(id, configId, value),

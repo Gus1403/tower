@@ -85,7 +85,7 @@ try {
   await page.locator('.inbox-row button', { hasText: 'Allow once' }).click();
   await page.waitForTimeout(50);
   ok(await page.locator('.inbox').isHidden(), 'inbox row disappears after Allow once');
-  ok((await page.locator('.col-needs .card').count()) === 0, 'needs-you column is empty');
+  ok((await page.locator('.col-needs .card', { hasText: 'landing-page' }).count()) === 0, 'landing-page left the needs-you column');
   await page.waitForTimeout(800);
   ok((await page.locator('.col-working .card', { hasText: 'landing-page' }).count()) === 1, 'landing-page moved to Working');
 
@@ -171,6 +171,104 @@ try {
   await p.waitForSelector('.panel .qchip');
   await shot(p, 'wa-phone-panel');
   await pctx.close();
+
+  // ---------- Wave B (wb2): questions, "/" menu, attachments, move ----------
+  console.log('wave B desktop 1440x900');
+  const bctx = await browser.newContext({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 2 });
+  const b = await bctx.newPage();
+  wire(b);
+  await b.goto(`${base}/?mock=1`);
+  await b.waitForSelector('.card');
+  await b.waitForTimeout(800);
+  const inInbox = (await b.locator('.qinbox .q-row').count()) > 0;
+  console.log(`  (QuestionsInbox mounted in App: ${inInbox})`);
+  await b.locator('.card', { hasText: 'fix-tests' }).click();
+  await b.waitForSelector('.panel .q-row');
+  await b.waitForTimeout(400);
+  await shot(b, 'wb2-desktop-question');
+  const qscope = inInbox ? '.qinbox' : '.panel';
+  await b.locator(`${qscope} .q-use`).first().click();
+  ok((await b.locator(`${qscope} .q-input`).first().inputValue()).startsWith('Make the backoff injectable'), 'Use recommendation fills the answer');
+  await b.locator(`${qscope} .q-input`).first().press('Enter');
+  await b.waitForSelector('.q-row', { state: 'detached', timeout: 1500 });
+  ok((await b.locator('.q-row').count()) === 0, 'answered question row disappears');
+  await b.waitForSelector('.panel .bubble:has-text("[Answer to")', { timeout: 3000 });
+  ok(true, 'answer is delivered as a prompt');
+
+  // "/" menu on the same (now working) agent
+  const ta = b.locator('.panel .composer textarea');
+  await ta.click();
+  await ta.type('/');
+  await b.waitForSelector('.panel .slash-menu');
+  ok((await b.locator('.panel .slash-item').count()) >= 3, '"/" opens the commands menu');
+  await ta.type('re');
+  ok((await b.locator('.panel .slash-item').count()) === 1, 'menu filters as you type');
+  await ta.press('Backspace');
+  await ta.press('Backspace');
+  await ta.press('ArrowDown');
+  ok((await b.locator('.panel .slash-item.on .slash-name').innerText()) === '/review', 'ArrowDown moves the selection');
+  await shot(b, 'wb2-desktop-slash');
+  await ta.press('Enter');
+  ok((await ta.inputValue()) === '/review ', 'Enter inserts "/review "');
+  ok((await b.locator('.panel .slash-menu').count()) === 0, 'menu closes after insert');
+  await ta.fill('');
+  await b.keyboard.press('Escape');
+
+  // attachment on a done agent
+  await b.locator('.card', { hasText: 'docs' }).first().click();
+  await b.waitForSelector('.panel .f-agent');
+  await b.locator('.panel input.c-file').setInputFiles({ name: 'notes.txt', mimeType: 'text/plain', buffer: Buffer.from('hello tower') });
+  await b.waitForSelector('.panel .att-chip.ok');
+  ok((await b.locator('.panel .att-chip').innerText()).includes('notes.txt'), 'attachment chip appears');
+  await b.locator('.panel .composer textarea').fill('Use the attached notes');
+  await shot(b, 'wb2-desktop-attach');
+  await b.locator('.panel .composer textarea').press('Enter');
+  await b.waitForSelector('.panel .bubble:has-text("Attached: attachments/notes.txt")', { timeout: 3000 });
+  ok((await b.locator('.panel .att-chip').count()) === 0, 'attachment is sent with the prompt and the chip clears');
+  await b.keyboard.press('Escape');
+
+  // move flow
+  await b.locator('.card', { hasText: 'migrate-db' }).first().click();
+  await b.waitForSelector('.panel .limit-banner');
+  ok((await b.locator('.panel .limit-text').innerText()).includes('hit its limit'), 'limit banner shows');
+  await b.locator('.panel .limit-move').click();
+  await b.waitForSelector('.panel .move-acc');
+  ok((await b.locator('.panel .move-acc').count()) === 1, 'picker lists the other logged-in claude account only');
+  await shot(b, 'wb2-desktop-move');
+  await b.locator('.panel .move-acc', { hasText: 'claude-3' }).click();
+  await b.waitForSelector('.panel .status-working', { timeout: 4000 });
+  ok((await b.locator('.panel .limit-banner').count()) === 0, 'move opens the new agent panel (no limit banner)');
+  ok((await b.locator('.panel .panel-name').innerText()) === 'migrate-db', 'new agent carries the same name');
+  await b.waitForTimeout(1500);
+  await shot(b, 'wb2-desktop-moved');
+  await bctx.close();
+
+  console.log('wave B phone 390x844');
+  const bp = await (await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true })).newPage();
+  wire(bp);
+  await bp.goto(`${base}/?mock=1`);
+  await bp.waitForSelector('.tabs');
+  await bp.waitForTimeout(800);
+  await shot(bp, 'wb2-phone-board');
+  await bp.locator('.tab', { hasText: 'Needs you' }).click();
+  await bp.locator('.card', { hasText: 'fix-tests' }).click();
+  await bp.waitForSelector('.panel .q-row');
+  await bp.waitForTimeout(400);
+  await shot(bp, 'wb2-phone-question');
+  await bp.locator('.panel .composer textarea').fill('/');
+  await bp.waitForSelector('.panel .slash-menu');
+  await shot(bp, 'wb2-phone-slash');
+  await bp.locator('.panel .composer textarea').fill('');
+  await bp.locator('.panel input.c-file').setInputFiles({ name: 'screenshot-of-the-bug.png', mimeType: 'image/png', buffer: Buffer.from('png') });
+  await bp.waitForSelector('.panel .att-chip.ok');
+  await shot(bp, 'wb2-phone-attach');
+  await bp.locator('.panel button[aria-label="Close"]').click();
+  await bp.locator('.tab', { hasText: 'Done' }).click();
+  await bp.locator('.card', { hasText: 'migrate-db' }).first().click();
+  await bp.waitForSelector('.panel .limit-banner');
+  await bp.locator('.panel .limit-move').click();
+  await bp.waitForSelector('.panel .move-acc');
+  await shot(bp, 'wb2-phone-move');
 } finally {
   await browser.close();
   server.kill();

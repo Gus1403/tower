@@ -1,7 +1,9 @@
 import { memo, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { AgentSummary, FeedItem } from '../../shared/contract';
 import { api, loadFeed } from './api';
-import { openAgent, patchAgentLocal, removeAgentLocal, toast, useNow, useStore } from './store';
+import { openAgent, patchAgentLocal, removeAgentLocal, toast, useAccounts, useNow, useStore } from './store';
+import { Composer } from './composer/Composer';
+import { PanelQuestions } from './Questions';
 import { Markdown } from './feed/markdown';
 import './panel.css';
 import { KindBadge, PermissionButtons, StatusPill, ago } from './ui';
@@ -125,109 +127,6 @@ function Feed({ id }: { id: string }) {
   );
 }
 
-function Composer({ a }: { a: AgentSummary }) {
-  const [text, setText] = useState('');
-  const busy = a.status === 'working' || a.status === 'needs_you' || a.status === 'starting';
-  const readOnly = a.source === 'tmux' || a.status === 'observed';
-  const dead = a.status === 'stopped' || a.status === 'error';
-  const disabled = readOnly || dead;
-  const reason = readOnly
-    ? 'Observed from tmux — read-only'
-    : a.status === 'error'
-      ? 'This agent hit an error'
-      : a.status === 'stopped'
-        ? a.resumable
-          ? 'Stopped — resume to continue'
-          : 'This agent was stopped'
-        : null;
-  const hint = reason ?? (busy ? 'Queue a follow-up for when this turn ends' : 'Reply or give a follow-up task');
-  const queued = a.queued ?? [];
-  const send = async (interrupt: boolean) => {
-    const t = text.trim();
-    if (!t || disabled) return;
-    setText('');
-    if (busy) patchAgentLocal(a.id, { queued: interrupt ? [t, ...queued] : [...queued, t] });
-    try {
-      await api.prompt(a.id, t, interrupt || undefined);
-    } catch (e) {
-      setText(t);
-      patchAgentLocal(a.id, { queued });
-      toast(`Could not send: ${(e as Error).message}`);
-    }
-  };
-  if (a.status === 'stopped' && a.resumable && !readOnly) {
-    return (
-      <div className="composer composer-resume">
-        <span className="muted">{reason}</span>
-        <button className="btn btn-primary btn-sm" onClick={() => api.resume(a.id).catch((e: Error) => toast(`Could not resume: ${e.message}`))}>
-          Resume
-        </button>
-      </div>
-    );
-  }
-  return (
-    <div className="composer-wrap">
-      {queued.length > 0 && (
-        <div className="queue" aria-label="Queued prompts">
-          <span className="queue-label">Queued</span>
-          {queued.map((q, i) => (
-            <span className="qchip" key={`${i}-${q}`} title={q}>
-              <span className="qchip-text">{q}</span>
-              <button
-                className="qchip-x"
-                aria-label="Remove queued prompt"
-                onClick={() => {
-                  patchAgentLocal(a.id, { queued: queued.filter((_, j) => j !== i) });
-                  api.removeQueued(a.id, i).catch((e: Error) => {
-                    patchAgentLocal(a.id, { queued });
-                    toast(`Could not remove: ${e.message}`);
-                  });
-                }}
-              >
-                ×
-              </button>
-            </span>
-          ))}
-        </div>
-      )}
-      <div className="composer">
-        <textarea
-          value={text}
-          disabled={disabled}
-          placeholder={hint}
-          rows={1}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
-              e.preventDefault();
-              void send(busy && (e.metaKey || e.ctrlKey));
-            }
-          }}
-        />
-        {busy && !disabled && (
-          <button
-            className="btn btn-secondary btn-sm c-interrupt"
-            disabled={!text.trim()}
-            onClick={() => void send(true)}
-            title="Interrupt & send (⌘/Ctrl+Enter)"
-          >
-            Interrupt &amp; send
-          </button>
-        )}
-        {busy && !disabled ? (
-          <button className="btn btn-primary btn-sm c-queue" disabled={!text.trim()} onClick={() => void send(false)} title="Queue (Enter)">
-            Queue
-          </button>
-        ) : (
-          <button className="btn btn-primary send" disabled={disabled || !text.trim()} onClick={() => void send(false)} aria-label="Send">
-            ↑
-          </button>
-        )}
-      </div>
-    </div>
-  );
-}
-
 function ControlBar({ a }: { a: AgentSummary }) {
   const live = a.source === 'tower' && a.status !== 'stopped' && a.status !== 'error' && a.status !== 'observed';
   const modes = a.modes ?? [];
@@ -293,7 +192,63 @@ function ControlBar({ a }: { a: AgentSummary }) {
   );
 }
 
-function MoreMenu({ a }: { a: AgentSummary }) {
+function MovePicker({ a, onClose }: { a: AgentSummary; onClose: () => void }) {
+  const accounts = useAccounts().filter((x) => x.kind === a.kind && x.loggedIn === true && x.id !== a.accountId);
+  const [busy, setBusy] = useState<string | null>(null);
+  const go = async (accountId: string) => {
+    setBusy(accountId);
+    try {
+      const n = await api.move(a.id, accountId);
+      onClose();
+      openAgent(n.id);
+    } catch (e) {
+      toast(`Could not move: ${(e as Error).message}`);
+    } finally {
+      setBusy(null);
+    }
+  };
+  return (
+    <div className="move-picker" role="listbox" aria-label="Continue on account">
+      <div className="move-head">
+        <span>Continue on</span>
+        <button className="icon-btn move-x" aria-label="Cancel" onClick={onClose}>
+          ✕
+        </button>
+      </div>
+      {accounts.length === 0 ? (
+        <div className="move-empty">No other logged-in {a.kind} account. Log one in from Accounts.</div>
+      ) : (
+        accounts.map((acc) => (
+          <button key={acc.id} role="option" aria-selected={false} className="move-acc" disabled={!!busy} onClick={() => void go(acc.id)}>
+            <span className="move-acc-label">{acc.label}</span>
+            <span className="move-acc-meta">{busy === acc.id ? 'Moving…' : acc.usedPct !== undefined ? `${acc.usedPct}% used` : (acc.plan ?? '')}</span>
+          </button>
+        ))
+      )}
+    </div>
+  );
+}
+
+function LimitBanner({ a, picking, setPicking }: { a: AgentSummary; picking: boolean; setPicking: (v: boolean) => void }) {
+  if (!a.limitHit && !picking) return null;
+  return (
+    <div className="limit-banner">
+      {a.limitHit && (
+        <div className="limit-row">
+          <span className="limit-text">This account hit its limit</span>
+          {!picking && (
+            <button className="btn btn-primary btn-sm limit-move" onClick={() => setPicking(true)}>
+              Continue on another account
+            </button>
+          )}
+        </div>
+      )}
+      {picking && <MovePicker a={a} onClose={() => setPicking(false)} />}
+    </div>
+  );
+}
+
+function MoreMenu({ a, onMove }: { a: AgentSummary; onMove: () => void }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -310,6 +265,32 @@ function MoreMenu({ a }: { a: AgentSummary }) {
       </button>
       {open && (
         <div className="more-menu" role="menu">
+          <button
+            role="menuitem"
+            className="more-move"
+            onClick={() => {
+              setOpen(false);
+              onMove();
+            }}
+          >
+            Continue on another account
+          </button>
+          <button
+            role="menuitem"
+            className="more-archive"
+            onClick={() => {
+              setOpen(false);
+              const next = !a.archived;
+              patchAgentLocal(a.id, { archived: next });
+              if (next) openAgent(null);
+              api.archive(a.id, next).catch((e: Error) => {
+                patchAgentLocal(a.id, { archived: !next });
+                toast(`Could not ${next ? 'archive' : 'unarchive'}: ${e.message}`);
+              });
+            }}
+          >
+            {a.archived ? 'Unarchive' : 'Archive'}
+          </button>
           <button
             role="menuitem"
             className="more-danger"
@@ -334,9 +315,11 @@ export function Panel() {
   const id = useStore((s) => s.openId);
   const a = useStore((s) => (s.openId ? s.agents[s.openId] : undefined));
   const now = useNow();
+  const [picking, setPicking] = useState(false);
 
   useEffect(() => {
     if (id) void loadFeed(id);
+    setPicking(false);
   }, [id]);
   useEffect(() => {
     const k = (e: KeyboardEvent) => e.key === 'Escape' && openAgent(null);
@@ -372,7 +355,7 @@ export function Panel() {
               Stop
             </button>
           )}
-          <MoreMenu a={a} />
+          <MoreMenu a={a} onMove={() => setPicking(true)} />
           <button className="icon-btn" onClick={() => openAgent(null)} aria-label="Close">
             ✕
           </button>
@@ -409,7 +392,9 @@ export function Panel() {
           <PermissionButtons agent={a} req={a.pendingPermission} />
         </div>
       )}
+      <PanelQuestions a={a} />
       {a.status === 'error' && a.error && <div className="panel-error">{a.error}</div>}
+      <LimitBanner a={a} picking={picking} setPicking={setPicking} />
       <Composer a={a} />
     </aside>
   );

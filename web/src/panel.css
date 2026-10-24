@@ -71,3 +71,19 @@ button.f-tool:hover { border-color: var(--border-strong); }
   .qchip-text { max-width: 200px; }
   .composer .c-interrupt { padding: 0 8px; font-size: 12px; }
 }
+
+/* Wave B: usage-limit banner + move picker */
+.limit-banner { border-top: 1px solid var(--amber-border); background: var(--amber-bg); padding: 10px 16px; display: flex; flex-direction: column; gap: 10px; }
+.limit-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.limit-text { flex: 1; min-width: 0; font-size: 13px; font-weight: 600; color: #92400e; }
+.limit-move { flex: none; }
+.move-picker { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow); padding: 4px; }
+.move-head { display: flex; align-items: center; justify-content: space-between; padding: 4px 6px 4px 10px; font-size: 11px; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.04em; }
+.move-x { width: 24px; height: 24px; font-size: 11px; }
+.move-acc { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; font: inherit; font-size: 13px; padding: 8px 10px; border: 0; background: none; border-radius: 7px; cursor: pointer; color: var(--text); min-width: 0; }
+.move-acc:hover:not(:disabled) { background: #f5f5f4; }
+.move-acc:disabled { opacity: 0.6; cursor: default; }
+.move-acc-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.move-acc-meta { flex: none; font-size: 12px; color: var(--text-3); }
+.move-empty { padding: 8px 10px; font-size: 13px; color: var(--text-2); }
+.more-menu { min-width: 210px; }

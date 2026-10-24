@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from 'react';
-import type { Account, AgentSummary, Capacity, FeedItem, ServerEvent } from '../../shared/contract';
+import type { Account, AgentSummary, Capacity, FeedItem, Note, ServerEvent } from '../../shared/contract';
 
 export interface Toast {
   id: number;
@@ -10,6 +10,7 @@ export interface State {
   agents: Record<string, AgentSummary>;
   capacity: Capacity[];
   accounts: Account[];
+  notes: Note[];
   host: string;
   feeds: Record<string, FeedItem[]>;
   feedLoaded: Record<string, boolean>;
@@ -24,6 +25,7 @@ let state: State = {
   agents: {},
   capacity: [],
   accounts: [],
+  notes: [],
   host: '',
   feeds: {},
   feedLoaded: {},
@@ -74,7 +76,7 @@ export function applyEvent(ev: ServerEvent): void {
     case 'snapshot': {
       const agents: Record<string, AgentSummary> = {};
       for (const a of ev.state.agents) agents[a.id] = a;
-      setState((s) => ({ ...s, agents, capacity: ev.state.capacity, accounts: ev.state.accounts ?? [], host: ev.state.host }));
+      setState((s) => ({ ...s, agents, capacity: ev.state.capacity, accounts: ev.state.accounts ?? [], notes: ev.state.notes ?? s.notes, host: ev.state.host }));
       return;
     }
     case 'agent':
@@ -94,6 +96,9 @@ export function applyEvent(ev: ServerEvent): void {
       return;
     case 'agent_removed':
       removeAgentLocal(ev.agentId);
+      return;
+    case 'notes':
+      setState((s) => ({ ...s, notes: ev.notes }));
       return;
   }
 }
@@ -117,6 +122,22 @@ export function patchAgentLocal(id: string, p: Partial<AgentSummary>): void {
 export const selectAccounts = (s: State): Account[] => s.accounts;
 export function useAccounts(): Account[] {
   return useStore(selectAccounts);
+}
+
+export const selectNotes = (s: State): Note[] => s.notes;
+export function useNotes(): Note[] {
+  return useStore(selectNotes);
+}
+/** Optimistically upsert / drop a note (the next server 'notes' event wins). */
+export function upsertNoteLocal(n: Note): void {
+  setState((s) => {
+    const i = s.notes.findIndex((x) => x.id === n.id);
+    const notes = i === -1 ? [...s.notes, n] : s.notes.map((x) => (x.id === n.id ? n : x));
+    return { ...s, notes };
+  });
+}
+export function removeNoteLocal(id: string): void {
+  setState((s) => ({ ...s, notes: s.notes.filter((x) => x.id !== id) }));
 }
 
 /** Merge a fetched full feed with any live items that arrived meanwhile (live ones win). */

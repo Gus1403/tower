@@ -1,0 +1,40 @@
+/* Questions (tower ask): amber like the permission inbox. Uses styles.css tokens. */
+.qinbox {
+  background: var(--amber-bg); border: 1px solid var(--amber-border); border-radius: var(--radius);
+  margin-bottom: 16px; overflow: hidden;
+}
+.qinbox-head { display: flex; align-items: center; gap: 8px; padding: 10px 16px; border-bottom: 1px solid var(--amber-border); }
+.qinbox-title { font-weight: 600; color: #92400e; }
+.qinbox .q-row { padding: 12px 16px; }
+.qinbox .q-row + .q-row { border-top: 1px solid var(--amber-border); }
+
+.q-row { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.q-line { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.q-agent { font: inherit; font-weight: 600; border: 0; background: none; padding: 0; cursor: pointer; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.q-agent:hover { text-decoration: underline; }
+.q-tag { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: #b45309; background: #fef3c7; border-radius: 999px; padding: 1px 8px; }
+.q-text { font-size: 14px; line-height: 1.45; color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; }
+.q-rec { display: flex; align-items: flex-start; gap: 10px; font-size: 13px; color: var(--text-2); }
+.q-rec-text { flex: 1; min-width: 0; line-height: 1.45; overflow-wrap: anywhere; }
+.q-rec-label { color: var(--text-3); }
+.q-use {
+  flex: none; font: inherit; font-size: 12px; font-weight: 500; color: #92400e; background: #fff;
+  border: 1px solid var(--amber-border); border-radius: 7px; padding: 3px 9px; cursor: pointer; white-space: nowrap;
+}
+.q-use:hover { background: #fffbeb; border-color: var(--amber); }
+.q-answer { display: flex; gap: 8px; align-items: flex-end; }
+.q-input {
+  flex: 1; min-width: 0; font: inherit; font-size: 14px; resize: none; min-height: 36px; max-height: 140px;
+  border: 1px solid var(--border-strong); border-radius: 9px; padding: 8px 10px; background: #fff; color: var(--text);
+  field-sizing: content;
+}
+.q-input:focus { outline: none; border-color: var(--amber); box-shadow: 0 0 0 3px rgba(217, 119, 6, 0.12); }
+.q-send { height: 36px; flex: none; }
+
+.panel-questions { display: flex; flex-direction: column; gap: 10px; padding: 12px 16px; background: var(--amber-bg); border-top: 1px solid var(--amber-border); max-height: 45vh; overflow-y: auto; }
+.panel-questions .q-row + .q-row { border-top: 1px solid var(--amber-border); padding-top: 10px; }
+
+@media (max-width: 640px) {
+  .q-rec { flex-direction: column; gap: 6px; }
+  .qinbox .q-row { padding: 12px; }
+}

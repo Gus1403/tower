@@ -6,10 +6,12 @@ import type {
   AgentSummary,
   Capacity,
   FeedItem,
+  Note,
   PlanEntry,
   ServerEvent,
 } from '../../shared/contract';
 import type { Transport } from './api';
+import type { LaunchRequest } from '../../shared/contract';
 
 type Step =
   | { say: string }
@@ -50,6 +52,7 @@ export function mockTransport(): Transport {
 
   const accountsList: Account[] = [
     { id: 'claude-12', kind: 'claude', label: 'Claude · ~/.claude-12', home: '~/.claude-12', loggedIn: true, plan: 'max', usedPct: 42, detail: '5h window 42% used', running: 0, loginCommand: 'CLAUDE_CONFIG_DIR=~/.claude-12 claude /login' },
+    { id: 'claude-3', kind: 'claude', label: 'Claude · ~/.claude-3', home: '~/.claude-3', loggedIn: true, plan: 'max', usedPct: 9, detail: '5h window 9% used', running: 0, loginCommand: 'CLAUDE_CONFIG_DIR=~/.claude-3 claude /login' },
     { id: 'claude-7', kind: 'claude', label: 'Claude · ~/.claude-7', home: '~/.claude-7', loggedIn: false, running: 0, detail: 'Not logged in', loginCommand: 'CLAUDE_CONFIG_DIR=~/.claude-7 claude /login' },
     { id: 'codex', kind: 'codex', label: 'Codex · ~/.codex', loggedIn: true, plan: 'pro', usedPct: 18, detail: 'Weekly limit 18% used', running: 0, loginCommand: 'codex login' },
     { id: 'devin', kind: 'devin', label: 'Devin', loggedIn: true, plan: 'Devin Max', running: 0, loginCommand: 'devin auth login' },
@@ -72,9 +75,28 @@ export function mockTransport(): Transport {
     ],
     devin: [{ id: 'thought_level', name: 'Thought level', currentValue: 'normal', options: [{ value: 'normal', name: 'Normal thinking' }, { value: 'deep', name: 'Deep thinking' }] }],
   };
+  const COMMANDS: Record<AgentKind, { name: string; description?: string }[]> = {
+    claude: [
+      { name: 'compact', description: 'Summarize the conversation to free context' },
+      { name: 'review', description: 'Review the current diff' },
+      { name: 'init', description: 'Write a CLAUDE.md for this repo' },
+      { name: 'pr-comments', description: 'Fetch comments from the open PR' },
+      { name: 'clear', description: 'Start a fresh conversation' },
+    ],
+    codex: [
+      { name: 'review', description: 'Review my current changes' },
+      { name: 'diff', description: 'Show the git diff' },
+      { name: 'compact', description: 'Summarize to free context' },
+    ],
+    devin: [
+      { name: 'plan', description: 'Switch to plan mode' },
+      { name: 'test', description: 'Run the test suite' },
+    ],
+  };
   const ACC: Record<AgentKind, string> = { claude: 'claude-12', codex: 'codex', devin: 'devin' };
-  const defaults = (kind: AgentKind): Pick<AgentSummary, 'queued' | 'modes' | 'mode' | 'configOptions' | 'usage' | 'accountId'> => ({
+  const defaults = (kind: AgentKind): Pick<AgentSummary, 'queued' | 'modes' | 'mode' | 'configOptions' | 'usage' | 'accountId' | 'commands'> => ({
     queued: [],
+    commands: COMMANDS[kind],
     modes: MODES[kind],
     mode: MODES[kind][0].id,
     configOptions: CONFIG[kind].map((c) => ({ ...c })),
@@ -192,8 +214,17 @@ export function mockTransport(): Transport {
   a2.pendingPermission = permReq;
   feed(a2.id, { type: 'permission', id: 'perm-r-vite', at: T - 21000, requestId: 'r-vite', title: permReq.title }, true);
 
-  const a3 = mkAgent('c9p4', 'claude', 'fix-tests', 'Fix the flaky websocket reconnect test in server/test', 'stuck', 1630, {
+  const a3 = mkAgent('c9p4', 'claude', 'fix-tests', 'Fix the flaky websocket reconnect test in server/test', 'needs_you', 1630, {
     toolCalls: 11,
+    questions: [
+      {
+        id: 'q-flake',
+        agentId: 'c9p4',
+        text: 'The flake comes from a 50 ms backoff race. Should I fix it with fake timers in the test, or by making the client backoff injectable?',
+        recommendation: 'Make the backoff injectable; the test then passes a 0 ms delay and stays deterministic.',
+        createdAt: T - 95000,
+      },
+    ],
     lastMessage: 'Running the reconnect test 50 times to reproduce the flake…',
   });
   seedHistory(a3.id, a3.task, [
@@ -246,7 +277,26 @@ export function mockTransport(): Transport {
     cwd: '~/code/eva/.desk/review',
     lastMessage: 'Cross-model review: 0 P0, 1 P1 folded.',
   };
-  [a1, a2, a3, a4, a5, o1, o2].forEach((a) => agents.set(a.id, a));
+  const a6 = mkAgent('f8n3', 'claude', 'migrate-db', 'Migrate the agents table to store accountId and archived', 'error', 980, {
+    toolCalls: 4,
+    limitHit: true,
+    error: 'Claude usage limit reached (429). Your limit resets at 18:00.',
+    lastMessage: 'Usage limit reached',
+  });
+  seedHistory(a6.id, a6.task, [
+    tc('Read server/src/db.ts', 'read', 'server/src/db.ts'),
+    { type: 'agent_message', text: 'I will add two nullable columns and backfill accountId from the launch log.' },
+    tc('Write server/migrations/004_agents.sql', 'edit', 'server/migrations/004_agents.sql  +14'),
+    { type: 'status', text: 'Error: usage limit reached (429)' },
+  ], 980);
+  a6.lastActivityAt = T - 4 * 60 * 1000;
+  const notes: Note[] = [
+    { id: 'n1', title: 'Dark mode for settings', body: 'Add a theme toggle to settings and persist it in localStorage.', createdAt: T - 3600_000 },
+    { id: 'n2', title: 'Flaky CI on Linux', body: 'ws.test.ts fails ~1 in 20 on the Linux runner. Look at the backoff timer.', createdAt: T - 7200_000 },
+  ];
+  const emitNotes = () => emit({ type: 'notes', notes: notes.map((n) => ({ ...n })) });
+  const uploads = new Map<string, string>();
+  [a1, a2, a3, a4, a5, a6, o1, o2].forEach((a) => agents.set(a.id, a));
   for (const o of [o1, o2]) feed(o.id, { type: 'status', id: uid('st'), at: o.createdAt, text: 'Observed from tmux (read-only)' }, true);
 
   // ---------- scripts ----------
@@ -406,12 +456,48 @@ export function mockTransport(): Transport {
   const fail = (msg: string) => Promise.reject(new Error(msg));
   const delay = <X>(v: X, ms = 160) => new Promise<X>((res) => setTimeout(() => res(v), ms));
 
+  function launchNow(req: LaunchRequest): Promise<AgentSummary> {
+    if (!req.task.trim()) return fail('Task is required');
+    const id = Math.random().toString(36).slice(2, 6);
+    const name = req.name?.trim() || req.task.trim().split(/\s+/).slice(0, 4).join(' ').toLowerCase();
+    const a: AgentSummary = {
+      id,
+      kind: req.kind,
+      name,
+      task: req.task.trim(),
+      cwd: `~/tower-work/${name.replace(/[^a-z0-9]+/gi, '-')}`,
+      source: 'tower',
+      status: 'starting',
+      createdAt: Date.now(),
+      lastActivityAt: Date.now(),
+      toolCalls: 0,
+      model: req.model,
+      ...defaults(req.kind),
+      accountId: req.accountId && req.accountId !== 'auto' ? req.accountId : ACC[req.kind],
+    };
+    put(a);
+    emit({ type: 'capacity', capacity: capacity() });
+    emit({ type: 'accounts', accounts: accounts() });
+    feed(id, { type: 'status', id: uid('st'), at: Date.now(), text: 'Started' });
+    setTimeout(() => {
+      feed(id, { type: 'user_message', id: uid('u'), at: Date.now(), text: a.task });
+      patch(id, {
+        status: 'working',
+        plan: plan(['Explore the codebase', 'Make the change', 'Run the tests', 'Summarize'], 0),
+        lastMessage: `${LABEL[a.kind]} is reading the workspace…`,
+      });
+      runners.set(id, replyScript(a.task, true));
+    }, 900);
+    return delay({ ...a }, 120);
+  }
+
+
   return {
     connect(onEvent, onStatus) {
       emit = onEvent;
       setTimeout(() => {
         onStatus(true);
-        onEvent({ type: 'snapshot', state: { agents: [...agents.values()], capacity: capacity(), accounts: accounts(), host: 'eva-forge' } });
+        onEvent({ type: 'snapshot', state: { agents: [...agents.values()], capacity: capacity(), accounts: accounts(), notes: notes.map((n) => ({ ...n })), host: 'eva-forge' } });
         setInterval(tick, 650);
       }, 0);
     },
@@ -420,40 +506,67 @@ export function mockTransport(): Transport {
       return list ? delay(list.map((x) => ({ ...x })), 220) : fail('No such agent');
     },
     launch(req) {
-      if (!req.task.trim()) return fail('Task is required');
-      const id = Math.random().toString(36).slice(2, 6);
-      const name = req.name?.trim() || req.task.trim().split(/\s+/).slice(0, 4).join(' ').toLowerCase();
-      const a: AgentSummary = {
-        id,
-        kind: req.kind,
-        name,
-        task: req.task.trim(),
-        cwd: `~/tower-work/${name.replace(/[^a-z0-9]+/gi, '-')}`,
-        source: 'tower',
-        status: 'starting',
-        createdAt: Date.now(),
-        lastActivityAt: Date.now(),
-        toolCalls: 0,
-        model: req.model,
-        ...defaults(req.kind),
-        accountId: req.accountId && req.accountId !== 'auto' ? req.accountId : ACC[req.kind],
-      };
-      put(a);
-      emit({ type: 'capacity', capacity: capacity() });
-      emit({ type: 'accounts', accounts: accounts() });
-      feed(id, { type: 'status', id: uid('st'), at: Date.now(), text: 'Started' });
-      setTimeout(() => {
-        feed(id, { type: 'user_message', id: uid('u'), at: Date.now(), text: a.task });
-        patch(id, {
-          status: 'working',
-          plan: plan(['Explore the codebase', 'Make the change', 'Run the tests', 'Summarize'], 0),
-          lastMessage: `${LABEL[a.kind]} is reading the workspace…`,
-        });
-        runners.set(id, replyScript(a.task, true));
-      }, 900);
-      return delay({ ...a }, 120);
+      return launchNow(req);
     },
-    prompt(id, text, interrupt) {
+    answer(id, questionId, text) {
+      const a = agents.get(id);
+      const q = a?.questions?.find((x) => x.id === questionId);
+      if (!a || !q) return fail('No such question');
+      const rest = (a.questions ?? []).filter((x) => x.id !== questionId);
+      const msg = `[Answer to «${q.text.slice(0, 160)}»] ${text}`;
+      patch(id, { questions: rest });
+      if (rest.length === 0) setTimeout(() => startTurn(id, msg, agents.get(id)?.queued ?? []), 120);
+      else patch(id, { queued: [...(a.queued ?? []), msg] });
+      return delay(undefined, 90);
+    },
+    move(id, accountId) {
+      const a = agents.get(id);
+      const acc = accountsList.find((x) => x.id === accountId);
+      if (!a) return fail('No such agent');
+      if (!acc || acc.kind !== a.kind) return fail('Account must be the same kind');
+      runners.delete(id);
+      feed(id, { type: 'status', id: uid('st'), at: Date.now(), text: `Moved to ${acc.label}` });
+      patch(id, { status: 'stopped', archived: true, limitHit: false });
+      return launchNow({ kind: a.kind, task: a.task, name: a.name, accountId }).then((n) => n);
+    },
+    archive(id, archived) {
+      const a = agents.get(id);
+      if (!a) return fail('No such agent');
+      patch(id, { archived });
+      return delay(undefined, 60);
+    },
+    upload(file) {
+      const id = uid('up');
+      uploads.set(id, file.name);
+      return delay({ id, name: file.name, size: file.size }, 200);
+    },
+    createNote(title, body) {
+      const n: Note = { id: uid('n'), title, body, createdAt: Date.now() };
+      notes.push(n);
+      emitNotes();
+      return delay({ ...n }, 80);
+    },
+    updateNote(id, p) {
+      const i = notes.findIndex((n) => n.id === id);
+      if (i === -1) return fail('No such note');
+      notes[i] = { ...notes[i], ...p };
+      emitNotes();
+      return delay({ ...notes[i] }, 80);
+    },
+    deleteNote(id) {
+      const i = notes.findIndex((n) => n.id === id);
+      if (i === -1) return fail('No such note');
+      notes.splice(i, 1);
+      emitNotes();
+      return delay(undefined, 60);
+    },
+    startNote(id, kind, accountId) {
+      const n = notes.find((x) => x.id === id);
+      if (!n) return fail('No such note');
+      return launchNow({ kind, task: `${n.title}\n\n${n.body}`.trim(), name: n.title.split(/\s+/).slice(0, 4).join(' ').toLowerCase(), accountId });
+    },
+    prompt(id, text, interrupt, attachments) {
+      if (attachments?.length) text = [text, ...attachments.map((u) => `Attached: attachments/${uploads.get(u) ?? u}`)].filter(Boolean).join('\n');
       const a = agents.get(id);
       if (!a) return fail('No such agent');
       if (a.source === 'tmux' || a.status === 'observed') return fail('Observed agents are read-only');
