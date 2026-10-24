@@ -88,6 +88,17 @@ own work folder. Agents are spawned without any `TOWER_*` variable in their envi
 run as the same OS user as Tower, so a determined agent could read Tower's env file; run Tower under its own user
 for stronger isolation. Never expose it to the public internet.
 
+## Session history and context
+
+Opening a card fills the screen. Return to the board keeps its filters and position; session URLs can be bookmarked.
+ACP agents retain their live feed and controls. Interactive tmux sessions offer conversation history and the live
+terminal, with per-session drafts, older-message loading, and a collapsible context sidebar.
+
+On Linux, local Claude history is read through the session's verified process registry; no session is resumed or
+sent a message to read its history. Unsupported or unverified histories retain terminal access. Existing fleet
+context is read from the local board socket. Web links open directly; linked files use the configured protected
+viewer. The same tmux allowlist and demo-redaction policy apply to workspace details.
+
 ## Agent notes (from real ACP probes)
 
 | Agent | Launch | Asks permission when |

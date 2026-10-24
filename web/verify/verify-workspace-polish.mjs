@@ -38,7 +38,7 @@ const ok = (cond, msg) => {
   checks++;
   console.log(`  ✓ ${msg}`);
 };
-const browser = await chromium.launch();
+const browser = await chromium.launch({ executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || undefined });
 const wire = (page) => {
   page.on('console', (m) => m.type() === 'error' && errors.push(m.text()));
   page.on('pageerror', (e) => errors.push(String(e)));

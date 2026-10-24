@@ -184,8 +184,8 @@ export async function sessionWorkspace(manager: Manager, id: string, before?: st
     if (!board.ok || !Array.isArray(board.state?.cards)) throw new Error('Forja board unavailable');
     const matches = board.state.cards.filter(c => c?.session === session && (c.kind === 'session' || c.kind === 'routine'));
     if (matches.length === 1) card = matches[0];
-  } catch { return { code: 200, body: unavailable('Forja board unavailable') }; }
-  if (!card || card.agent !== agent.kind || typeof card.id !== 'string' || typeof card.sessionId !== 'string') return { code: 200, body: unavailable('No matching Forja session') };
+  } catch { return { code: 200, body: unavailable('Session context is temporarily unavailable') }; }
+  if (!card || card.agent !== agent.kind || typeof card.id !== 'string' || typeof card.sessionId !== 'string') return { code: 200, body: unavailable('Session details are not available yet') };
   let publicOrigin: string | undefined;
   try {
     const config = JSON.parse(await readFile(process.env.TOWER_FORJA_CONFIG ?? path.join(os.homedir(), '.config', 'forja', 'config.json'), 'utf8')) as Config;

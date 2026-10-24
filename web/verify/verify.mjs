@@ -19,7 +19,7 @@ const port = await new Promise((res) => {
   });
 });
 
-const server = spawn('npx', ['vite', 'preview', '--host', '127.0.0.1', '--port', String(port), '--strictPort'], {
+const server = spawn(process.execPath, [path.join(webDir, 'node_modules/vite/bin/vite.js'), 'preview', '--host', '127.0.0.1', '--port', String(port), '--strictPort'], {
   cwd: webDir,
   stdio: ['ignore', 'pipe', 'pipe'],
 });
@@ -127,6 +127,7 @@ try {
   ok((await page.locator('.panel .bubble', { hasText: 'troubleshooting' }).count()) === 1, 'prompt shows as user bubble and agent goes working');
   // queue while working
   await page.locator('.panel .composer textarea').fill('Also add an FAQ');
+  await page.waitForFunction(() => { const send = document.querySelector('.panel .c-send'); return send && !send.disabled; });
   await page.keyboard.press('Enter');
   await page.waitForSelector('.panel .qchip', { timeout: 1000 });
   ok((await page.locator('.panel .qchip', { hasText: 'FAQ' }).count()) === 1, 'queued chip appears while working');
@@ -267,7 +268,7 @@ try {
   await bp.locator('.panel input.c-file').setInputFiles({ name: 'screenshot-of-the-bug.png', mimeType: 'image/png', buffer: Buffer.from('png') });
   await bp.waitForSelector('.panel .att-chip.ok');
   await shot(bp, 'wb2-phone-attach');
-  await bp.locator('.panel button[aria-label="Close"]').click();
+  await bp.locator('.panel button[aria-label="Back to board"]').click();
   await bp.locator('.tab', { hasText: 'Done' }).click();
   await bp.locator('.card', { hasText: 'migrate-db' }).first().click();
   await bp.waitForSelector('.panel .limit-banner');

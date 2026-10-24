@@ -66,7 +66,7 @@ function realTransport(): Transport {
     });
     const text = await res.text();
     const data = text ? JSON.parse(text) : undefined;
-    if (!res.ok) throw new Error((data && data.error) || `HTTP ${res.status}`);
+    if (!res.ok) throw Object.assign(new Error((data && data.error) || `HTTP ${res.status}`), { status: res.status });
     return data as T;
   }
   return {

@@ -134,7 +134,11 @@ export function useSessionWorkspace(id: string) {
       });
     } catch (e) {
       const msg = (e as Error).message || 'Request failed';
-      if (alive.current) setSt((s) => ({ ...s, loadingOlder: false, olderError: at === epoch.current ? msg : s.olderError }));
+      if (!alive.current || at !== epoch.current) return;
+      if ((e as Error & { status?: number }).status === 409) {
+        cursor.current = { set: true };
+        setSt((s) => ({ ...s, loadingOlder: false, hasMore: false, olderGone: msg }));
+      } else setSt((s) => ({ ...s, loadingOlder: false, olderError: msg }));
     } finally {
       olderInflight.current = false;
     }

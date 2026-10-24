@@ -491,7 +491,7 @@ export function mockTransport(): Transport {
       return { conversation: { available: false, reason: 'The transcript is still being indexed.', items: [], hasMore: false }, context };
     }
     if (id === o3.id && before !== undefined && flags.has('stale-older')) {
-      return { conversation: { available: false, reason: 'The transcript was rotated since this page was listed.', items: [], hasMore: false }, context };
+      throw Object.assign(new Error('The transcript was rotated since this page was listed.'), { status: 409 });
     }
     if (a.source !== 'tmux') {
       return { conversation: { available: true, items: (feeds.get(id) ?? []).map((x) => ({ ...x })), hasMore: false }, context };
