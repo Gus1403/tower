@@ -6,6 +6,7 @@ import type { AgentManager } from './agents.js';
 import { saveUpload } from './uploads.js';
 import type { Rotation } from './rotation.js';
 import { ALLOWED_KEYS, MAX_SEND_CHARS, formatTarget, tmuxAllowed, tmuxKey, tmuxScreen, tmuxSend } from './tmux-control.js';
+import { sessionWorkspace } from './session-workspace.js';
 
 export interface ExtraCtx {
   req: http.IncomingMessage;
@@ -68,6 +69,13 @@ export async function handleExtra(ctx: ExtraCtx): Promise<boolean> {
       json(res, r.code, { error: r.error });
       if (r.code === 413) res.on('finish', () => req.destroy());
     }
+    return true;
+  }
+
+  const workspace = p.match(/^\/api\/agents\/([^/]+)\/workspace$/);
+  if (req.method === 'GET' && workspace) {
+    const result = await sessionWorkspace(ctx.manager, decodeURIComponent(workspace[1]!), url.searchParams.get('before') ?? undefined);
+    json(res, result.code, result.body);
     return true;
   }
 
