@@ -92,15 +92,41 @@ export function upsertFeed(list: FeedItem[] | undefined, item: FeedItem): FeedIt
   return copy;
 }
 
+// Demo mode (default on): the owner's existing sessions carry real customer names, so on a shared screen they are
+// shown as "<Kind> session N". Toggle in the ⋯ menu; stored in localStorage `tower.demo`.
+export function demoMode(): boolean {
+  try {
+    return localStorage.getItem('tower.demo') !== '0';
+  } catch {
+    return true;
+  }
+}
+export function setDemoMode(on: boolean): void {
+  try {
+    localStorage.setItem('tower.demo', on ? '1' : '0');
+  } catch {
+    /* ignore */
+  }
+  location.reload();
+}
+const FLEET_LABEL: Record<string, string> = { devin: 'Devin', claude: 'Claude Code', codex: 'Codex' };
+const fleetNums = new Map<string, number>();
+function maskFleet(a: AgentSummary): AgentSummary {
+  if (a.source !== 'tmux' || !demoMode()) return a;
+  if (!fleetNums.has(a.id)) fleetNums.set(a.id, fleetNums.size + 1);
+  return { ...a, name: `${FLEET_LABEL[a.kind] ?? a.kind} session ${fleetNums.get(a.id)}`, task: 'Existing session', customer: undefined, lastMessage: undefined };
+}
+
 export function upsertAgent(agent: AgentSummary): void {
-  setState((s) => ({ ...s, agents: { ...s.agents, [agent.id]: agent } }));
+  const a = maskFleet(agent);
+  setState((s) => ({ ...s, agents: { ...s.agents, [a.id]: a } }));
 }
 
 export function applyEvent(ev: ServerEvent): void {
   switch (ev.type) {
     case 'snapshot': {
       const agents: Record<string, AgentSummary> = {};
-      for (const a of ev.state.agents) agents[a.id] = a;
+      for (const a of ev.state.agents) agents[a.id] = maskFleet(a);
       setState((s) => ({ ...s, agents, capacity: ev.state.capacity, accounts: ev.state.accounts ?? [], notes: ev.state.notes ?? s.notes, rotation: ev.state.rotation ?? s.rotation, boards: ev.state.boards?.length ? ev.state.boards : s.boards, host: ev.state.host }));
       return;
     }

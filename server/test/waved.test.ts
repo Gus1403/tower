@@ -215,13 +215,14 @@ test('wave D: boards CRUD, persisted 600, WS boards, launch onto customers, move
   const h = await inProc({ boardsFile });
   try {
     const st = await h.get<StateResponse>('/api/state');
-    assert.deepEqual(st.boards.map((b) => b.id), ['programs', 'customers']);
+    // routines board added for the owner's fleet (rutina-* sessions)
+    assert.deepEqual(st.boards.map((b) => b.id), ['programs', 'customers', 'routines']);
     assert.deepEqual(
       st.boards[1].columns.map((c) => [c.name, c.statuses]),
       [
         ['Handling', ['starting', 'working', 'needs_you', 'stuck']],
         ['Waiting on the customer', ['done']],
-        ['Asleep', ['stopped', 'error']],
+        ['Asleep', ['stopped', 'error', 'observed']], // existing fleet sessions with no Forja state rest here
       ],
     );
     assert.equal((await h.post('/api/boards', {})).status, 400);
@@ -267,7 +268,7 @@ test('wave D: boards CRUD, persisted 600, WS boards, launch onto customers, move
   const h2 = await inProc({ boardsFile });
   try {
     const st = await h2.get<StateResponse>('/api/state');
-    assert.deepEqual(st.boards.map((b) => b.id), ['programs', 'customers', 'kept']);
+    assert.deepEqual(st.boards.map((b) => b.id), ['programs', 'customers', 'routines', 'kept']);
   } finally {
     await h2.close();
   }

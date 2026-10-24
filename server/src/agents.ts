@@ -53,7 +53,7 @@ export const DEFAULT_BOARDS: Board[] = [
     name: 'Programs',
     columns: [
       { id: 'working', name: 'Working', statuses: ['needs_you', 'stuck', 'starting', 'working'] },
-      { id: 'done', name: 'Done', statuses: ['done', 'stopped', 'error'] },
+      { id: 'done', name: 'Done', statuses: ['done', 'stopped', 'error', 'observed'] },
     ],
   },
   {
@@ -62,7 +62,15 @@ export const DEFAULT_BOARDS: Board[] = [
     columns: [
       { id: 'handling', name: 'Handling', statuses: ['starting', 'working', 'needs_you', 'stuck'] },
       { id: 'waiting', name: 'Waiting on the customer', statuses: ['done'] },
-      { id: 'asleep', name: 'Asleep', statuses: ['stopped', 'error'] },
+      { id: 'asleep', name: 'Asleep', statuses: ['stopped', 'error', 'observed'] },
+    ],
+  },
+  {
+    id: 'routines',
+    name: 'Routines',
+    columns: [
+      { id: 'working', name: 'Working', statuses: ['needs_you', 'stuck', 'starting', 'working'] },
+      { id: 'done', name: 'Done', statuses: ['done', 'stopped', 'error', 'observed'] },
     ],
   },
 ];
@@ -1359,6 +1367,7 @@ export class AgentManager extends EventEmitter {
       const cur = bySession.get(sess);
       if (!cur || activity > cur.activity) bySession.set(sess, { kind, activity });
     }
+    const fleet = await this.readForjaBoard(new Set(bySession.keys()));
     const seen = new Set<string>();
     const changed: AgentSummary[] = [];
     for (const [sess, info] of bySession) {
@@ -1369,14 +1378,17 @@ export class AgentManager extends EventEmitter {
         this.tmuxNextN += 1;
       }
       const label = KIND_LABEL[info.kind];
+      const f = fleet.get(sess);
+      const board = f?.board ?? (sess.startsWith('cust-') ? 'customers' : sess.startsWith('rutina-') ? 'routines' : 'programs');
       const summary: AgentSummary = {
         id,
         kind: info.kind,
-        name: redact ? `${label} session ${this.tmuxNums.get(sess)}` : sess,
-        task: redact ? 'Existing tmux session' : sess,
+        name: redact ? `${label} session ${this.tmuxNums.get(sess)}` : (f?.name ?? sess),
+        task: redact ? 'Existing tmux session' : f?.work || f?.name || sess,
         cwd: '',
         source: 'tmux',
-        status: 'observed',
+        status: f?.status ?? 'observed',
+        board,
         createdAt: info.activity || Date.now(),
         lastActivityAt: info.activity || Date.now(),
         toolCalls: 0,
@@ -1397,6 +1409,33 @@ export class AgentManager extends EventEmitter {
       }
     }
     for (const s of changed) this.emit('agent', s);
+  }
+
+  // Read-only view of the owner's Forja board (if installed): session -> board, real state, one-line work.
+  // Forja rows are "group\tstate\tname\t\twork\ttouches"; programs use the tmux session name, customer rows use a
+  // display name whose slug matches cust-<slug>. Anything unmatched keeps the plain tmux card.
+  private async readForjaBoard(sessions: Set<string>): Promise<Map<string, { board: string; status: AgentStatus; name: string; work: string }>> {
+    const out = new Map<string, { board: string; status: AgentStatus; name: string; work: string }>();
+    const bin = process.env.TOWER_FORJA_BIN ?? path.join(os.homedir(), '.agents', 'bin', 'forja');
+    if (process.env.TOWER_FORJA === '0' || !existsSync(bin)) return out;
+    let text = '';
+    try {
+      text = await this.run(bin, ['board'], 8000);
+    } catch {
+      return out;
+    }
+    const BOARD: Record<string, string> = { Programas: 'programs', 'Clientes y leads': 'customers', Rutinas: 'routines' };
+    const STATE: Record<string, AgentStatus> = { 'Para ti': 'needs_you', Trabajando: 'working', 'En reposo': 'done' };
+    for (const line of text.split('\n')) {
+      const [group, state, name, , work] = line.split('\t');
+      const board = BOARD[group ?? ''];
+      if (!board || !name || !(state in STATE)) continue;
+      const slug = slugify(name);
+      const sess = sessions.has(name) ? name : sessions.has(`cust-${slug}`) ? `cust-${slug}` : sessions.has(`rutina-${slug}`) ? `rutina-${slug}` : undefined;
+      if (!sess || out.has(sess)) continue;
+      out.set(sess, { board, status: STATE[state], name, work: (work ?? '').trim() });
+    }
+    return out;
   }
 
   // test seam: run one tmux poll with an injected probe output (null = probe failed)

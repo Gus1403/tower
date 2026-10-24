@@ -1,7 +1,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { AgentKind, AgentStatus, AgentSummary, PermissionOption, PermissionRequest } from '../../shared/contract';
 import { api } from './api';
-import { getState, openAgent, setLaunchOpen, toast, upsertAgent, useNow, useStore } from './store';
+import { demoMode, getState, openAgent, setDemoMode, setLaunchOpen, toast, upsertAgent, useNow, useStore } from './store';
 import { canNotify, openAccounts, useAccounts, useMuted } from './Accounts';
 import { QuestionCard } from './Questions';
 
@@ -154,6 +154,10 @@ export function SettingsMenu() {
               Enable notifications
             </button>
           )}
+          <button role="menuitemcheckbox" aria-checked={demoMode()} className="menu-row demo-toggle" onClick={() => setDemoMode(!demoMode())}>
+            <span className="menu-check">{demoMode() ? '✓' : ''}</span>
+            Hide session names
+          </button>
           <div className="menu-sep" />
           <div className="menu-label">Theme</div>
           {(['system', 'light', 'dark'] as Theme[]).map((t) => (

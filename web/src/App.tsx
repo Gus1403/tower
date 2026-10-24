@@ -95,8 +95,10 @@ export function App() {
     const list = Object.values(agents);
     const live = list.filter((a) => !a.archived || a.source === 'tmux');
     const counts: Record<string, number> = {};
-    for (const a of live) if (a.source !== 'tmux' && a.status !== 'observed') counts[boardOf(a)] = (counts[boardOf(a)] ?? 0) + 1;
-    const onBoard = live.filter((a) => a.source !== 'tmux' && boardOf(a) === boardId);
+    // the owner's existing fleet (tmux sessions, states read from Forja) lives on the boards like any other agent
+    const fleetCard = (a: AgentSummary) => a.source !== 'tmux' || !!a.board;
+    for (const a of live) if (fleetCard(a)) counts[boardOf(a)] = (counts[boardOf(a)] ?? 0) + 1;
+    const onBoard = live.filter((a) => fleetCard(a) && boardOf(a) === boardId);
     const cols = {} as Record<Col, AgentSummary[]>;
     for (const c of COLS) {
       // decided: needs_you pinned first, then stuck, then the rest by recency
@@ -107,7 +109,7 @@ export function App() {
       if (c.statuses.includes('done'))
         cols[c.key].sort((a, b) => Number(a.status !== 'done') - Number(b.status !== 'done') || b.lastActivityAt - a.lastActivityAt);
     }
-    const observedAll = live.filter((a) => a.source === 'tmux' || a.status === 'observed');
+    const observedAll = live.filter((a) => !fleetCard(a));
     const observed = isPrograms ? observedAll.filter((a) => agentMatch(q, a)) : [];
     const archived = list.filter((a) => a.archived && a.source !== 'tmux' && boardOf(a) === boardId && agentMatch(q, a));
     return { cols, observed, archived, total: list.length - observedAll.length, counts };

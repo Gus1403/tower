@@ -225,7 +225,8 @@ export interface StateResponse {
 // WS { type: 'rotation'; rotation: RotationState } on every change; accounts changes still go out as 'accounts'.
 // ---- Wave D (boards + sessions talking to each other) ----
 // Default boards: programs { Working: needs_you|stuck|starting|working (needs_you pinned first), Done: done|stopped|error } and
-//      customers { Handling: starting|working|needs_you|stuck, Waiting on the customer: done, Asleep: stopped|error }.
+//      customers { Handling: starting|working|needs_you|stuck, Waiting on the customer: done, Asleep: stopped|error|observed },
+//      routines { Working, Done } — the owner's existing sessions (source tmux) carry board + real status read from Forja.
 // POST /api/boards { name, columns? } -> 201 Board (columns default to the programs set) · DELETE /api/boards/:id (empty only)
 // POST /api/agents/:id/board { board, customer? } -> 200 (moves a card between boards)
 // Agent CLI over the same unix socket:
