@@ -92,13 +92,13 @@ export function upsertFeed(list: FeedItem[] | undefined, item: FeedItem): FeedIt
   return copy;
 }
 
-// Demo mode (default on): the owner's existing sessions carry real customer names, so on a shared screen they are
-// shown as "<Kind> session N". Toggle in the ⋯ menu; stored in localStorage `tower.demo`.
+// Demo mode (default off): for a shared screen, the owner's existing sessions can be shown as "<Kind> session N".
+// Toggle in the ⋯ menu; stored in localStorage `tower.demo`.
 export function demoMode(): boolean {
   try {
-    return localStorage.getItem('tower.demo') !== '0';
+    return localStorage.getItem('tower.demo') === '1';
   } catch {
-    return true;
+    return false;
   }
 }
 export function setDemoMode(on: boolean): void {

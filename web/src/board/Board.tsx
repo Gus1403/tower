@@ -36,12 +36,8 @@ export function BoardCard({ a, selected, focused }: { a: AgentSummary; selected:
           </button>
         </div>
       )}
-      {observed &&
-        (a.interactive ? (
-          <div className="live-hint">Live — opens a terminal</div>
-        ) : (
-          <div className="ro-hint">Read-only</div>
-        ))}
+      {/* clicking a live session opens its terminal; only say something when it can't be opened */}
+      {observed && !a.interactive && <div className="ro-hint">Read-only</div>}
     </div>
   );
 }
