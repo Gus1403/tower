@@ -106,7 +106,7 @@ function CapacityChip({ c }: { c: Capacity }) {
     >
       <span className={`cap-dot kind-dot-${c.kind}`} />
       <span className="cap-label">{c.label}</span>
-      {accounts.length > 0 && <span className="cap-sub">· {logged} {logged === 1 ? 'account' : 'accounts'} ·</span>}
+      {accounts.length > 0 && <span className="cap-sub" title={`${logged} logged-in ${logged === 1 ? 'account' : 'accounts'}`}>· {logged} ·</span>}
       <span className="cap-num">{c.running}</span>
       <span className="cap-sub cap-run">running</span>
       {c.usedPct !== undefined && (

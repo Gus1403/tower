@@ -2,7 +2,9 @@
 button.cap { white-space: nowrap; flex: none; font: inherit; color: var(--text); cursor: pointer; }
 button.cap:hover { border-color: var(--border-strong); }
 .caps .cap .cap-sub { color: var(--text-3); white-space: nowrap; }
-.caps { min-width: 0; }
+.caps { min-width: 0; flex-wrap: nowrap; }
+.caps .cap, .caps .cap > span { white-space: nowrap; }
+.caps .cap { flex-shrink: 0; }
 .host { white-space: nowrap; }
 @media (max-width: 1600px) { .caps .cap .cap-run { display: none; } }
 @media (max-width: 1280px) { .caps .cap .cap-sub { display: none; } }
