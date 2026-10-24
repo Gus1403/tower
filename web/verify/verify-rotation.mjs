@@ -93,11 +93,11 @@ try {
   const reset = await row(page, 'claude-5').locator('.acc-reset').innerText();
   console.log('countdown:', reset);
   ok(/^back in (39|40)m$/.test(reset), 'countdown from resetAt');
-  ok((await row(page, 'codex-2').locator('.acc-badge').innerText()) === 'Excluded', 'excluded badge');
+  ok((await row(page, 'codex-2').locator('.acc-badge').innerText()) === 'Paused', 'excluded badge');
   ok((await row(page, 'claude-7').locator('.acc-badge').innerText()) === 'Logged out', 'logged out badge');
   ok((await row(page, 'claude-7').locator('.acc-cmd code').innerText()).includes('claude /login'), 'logged out shows login command');
   ok((await row(page, 'claude-7').locator('.acc-copy').count()) === 1, 'login command has Copy');
-  ok((await row(page, 'claude-12').locator('button', { hasText: 'Clear' }).count()) === 0, 'Clear only on exhausted');
+  ok((await row(page, 'claude-12').locator('button', { hasText: 'Reset limit' }).count()) === 0, 'Clear only on exhausted');
 
   // activity
   const acts = await page.locator('.acc-act-item').count();
@@ -115,16 +115,16 @@ try {
   ok((await sw.getAttribute('aria-checked')) === 'true', 'auto-rotate toggles back on');
 
   // exclude then include
-  await row(page, 'claude-3').locator('button', { hasText: 'Exclude' }).click();
+  await row(page, 'claude-3').locator('button', { hasText: 'Pause account' }).click();
   await page.waitForTimeout(250);
-  ok((await row(page, 'claude-3').locator('.acc-badge').innerText()) === 'Excluded', 'Exclude → Excluded');
+  ok((await row(page, 'claude-3').locator('.acc-badge').innerText()) === 'Paused', 'Pause → Paused');
   ok((await page.locator('.acc-count').allInnerTexts()).includes('1 of 4 available'), 'count drops to 1 of 4');
-  await row(page, 'claude-3').locator('button', { hasText: 'Include' }).click();
+  await row(page, 'claude-3').locator('button', { hasText: 'Resume' }).click();
   await page.waitForTimeout(250);
   ok((await row(page, 'claude-3').locator('.acc-badge').innerText()) === 'Available', 'Include → Available');
 
   // clear the exhausted one
-  await row(page, 'claude-5').locator('button', { hasText: 'Clear' }).click();
+  await row(page, 'claude-5').locator('button', { hasText: 'Reset limit' }).click();
   await page.waitForTimeout(250);
   ok((await row(page, 'claude-5').locator('.acc-badge').innerText()) === 'Available', 'Clear → Available');
   ok((await row(page, 'claude-5').locator('.acc-reset').count()) === 0, 'countdown gone after Clear');

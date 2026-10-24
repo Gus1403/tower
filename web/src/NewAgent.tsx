@@ -2,16 +2,24 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { AgentKind } from '../../shared/contract';
 import { api } from './api';
 import { getState, openAgent, setLaunchOpen, toast, upsertAgent, useStore } from './store';
-import { KIND_LABEL } from './ui';
+import { KINDS, KIND_LABEL } from './ui';
 import { useAccounts } from './Accounts';
 import { getActiveBoard } from './boards/activeBoard';
 
-const KINDS: AgentKind[] = ['devin', 'claude', 'codex'];
+const LAST_KIND = 'tower.lastKind';
+const lastKind = (): AgentKind => {
+  try {
+    const k = localStorage.getItem(LAST_KIND) as AgentKind | null;
+    return k && KINDS.includes(k) ? k : 'devin';
+  } catch {
+    return 'devin';
+  }
+};
 
 export function NewAgentDialog() {
   const open = useStore((s) => s.launchOpen);
   const capacity = useStore((s) => s.capacity);
-  const [kind, setKind] = useState<AgentKind>('devin');
+  const [kind, setKind] = useState<AgentKind>(lastKind);
   const [task, setTask] = useState('');
   const [name, setName] = useState('');
   const [busy, setBusy] = useState(false);
@@ -35,7 +43,9 @@ export function NewAgentDialog() {
 
   useEffect(() => {
     if (!open) return;
-    if (!avail(kind)) {
+    const lk = lastKind();
+    if (avail(lk)) setKind(lk);
+    else if (!avail(kind)) {
       const first = KINDS.find(avail);
       if (first) setKind(first);
     }
@@ -60,6 +70,11 @@ export function NewAgentDialog() {
         ...(board !== 'programs' ? { board } : {}),
         ...(needCustomer && customer.trim() ? { customer: customer.trim() } : {}),
       });
+      try {
+        localStorage.setItem(LAST_KIND, kind);
+      } catch {
+        /* ignore */
+      }
       upsertAgent(a);
       setTask('');
       setName('');
@@ -82,7 +97,21 @@ export function NewAgentDialog() {
             ✕
           </button>
         </div>
-        <div className="segmented" role="radiogroup">
+        <label className="field">
+          <span>Task</span>
+          <textarea
+            ref={ta}
+            rows={4}
+            value={task}
+            placeholder="What should it do?"
+            aria-label="Task"
+            onChange={(e) => setTask(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) void submit();
+            }}
+          />
+        </label>
+        <div className="segmented" role="radiogroup" aria-label="Agent">
           {KINDS.map((k) => (
             <button
               key={k}
@@ -116,43 +145,33 @@ export function NewAgentDialog() {
         {needCustomer && (
           <label className="field">
             <span>Customer</span>
-            <input value={customer} placeholder="e.g. cust-acme" aria-label="Customer" required onChange={(e) => setCustomer(e.target.value)} />
+            <input value={customer} placeholder="Customer name" aria-label="Customer" required onChange={(e) => setCustomer(e.target.value)} />
           </label>
         )}
-        {accounts.length > 0 && (
-          <label className="field">
-            <span>Account</span>
-            <select value={accountId} onChange={(e) => setAccountId(e.target.value)} aria-label="Account">
-              <option value="">Automatic (most headroom)</option>
-              {accounts.map((a) => (
-                <option key={a.id} value={a.id} disabled={a.loggedIn === false}>
-                  {a.label}
-                  {a.plan ? ` · ${a.plan}` : ''}
-                  {a.loggedIn === false ? ' (not logged in)' : a.usedPct !== undefined ? ` · ${Math.round(a.usedPct)}% used` : ''}
-                </option>
-              ))}
-            </select>
-          </label>
-        )}
-        <label className="field">
-          <span>Task</span>
-          <textarea
-            ref={ta}
-            rows={4}
-            value={task}
-            placeholder="What should it do?"
-            onChange={(e) => setTask(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) void submit();
-            }}
-          />
-        </label>
         <label className="field">
           <span>
             Name <em>optional</em>
           </span>
           <input value={name} placeholder="e.g. api-routes" onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && void submit()} />
         </label>
+        {accounts.length > 0 && (
+          <details className="na-advanced">
+            <summary>Advanced</summary>
+          <label className="field">
+            <span>Account</span>
+            <select value={accountId} onChange={(e) => setAccountId(e.target.value)} aria-label="Account">
+              <option value="">Automatic</option>
+              {accounts.map((a) => (
+                <option key={a.id} value={a.id} disabled={a.loggedIn === false}>
+                  {a.label}
+                  {a.plan ? ` · ${a.plan}` : ''}
+                  {a.loggedIn === false ? ' (logged out)' : a.usedPct !== undefined ? ` · ${Math.round(a.usedPct)}% used` : ''}
+                </option>
+              ))}
+            </select>
+          </label>
+          </details>
+        )}
         <div className="dialog-foot">
           <span className="hint">
             <kbd>⌘</kbd>

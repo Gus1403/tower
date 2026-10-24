@@ -285,10 +285,11 @@ try {
       const b = wp.locator('.inbox-row .perm-actions button.btn-primary').first();
       if (await b.count()) await b.click().catch(() => {});
       const a = await agentById(intId);
-      return a?.status === 'working' && (await wp.locator('.panel .b-interrupt').count()) > 0 && (await wp.locator('.inbox-row').count()) === 0;
+      return a?.status === 'working' && (await wp.locator('.panel .more > .icon-btn').count()) > 0 && (await wp.locator('.inbox-row').count()) === 0;
     }, 120000, 1000);
     await wp.waitForTimeout(3000);
-    await wp.locator('.panel .b-interrupt').click();
+    await wp.locator('.panel .more > .icon-btn').click();
+    await wp.locator('.more-menu .more-interrupt').click();
     const a = await until(async () => { const x = await agentById(intId); return x?.status === 'done' ? x : null; }, 30000, 500);
     ok(a.stopReason === 'cancelled', `interrupt -> done stopReason=${a.stopReason}`);
     await shot(wp, 'livea-interrupted');
@@ -337,9 +338,9 @@ try {
     const name = (await agentById(id)).name;
     await wp.locator('.card', { hasText: name }).first().click();
     await wp.waitForSelector('.panel');
-    wp.once('dialog', (d) => d.accept());
     await wp.locator('.panel button[aria-label="More"]').click();
-    await wp.locator('.more-menu button', { hasText: 'Remove card' }).click();
+    await wp.locator('.more-menu .more-danger').click();
+    await wp.locator('.more-menu .more-remove').click();
     await until(async () => !(await agentById(id)), 15000, 500);
     await wp.waitForTimeout(500);
     ok((await wp.locator('.card', { hasText: name }).count()) === 0, 'card removed from board and state');

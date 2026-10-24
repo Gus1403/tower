@@ -83,7 +83,7 @@ function sortAccounts(list: Account[]): Account[] {
     return 0;
   });
 }
-const STATUS_TEXT: Record<AccStatus, string> = { ok: 'Available', exhausted: 'At limit', excluded: 'Excluded', logged_out: 'Logged out' };
+const STATUS_TEXT: Record<AccStatus, string> = { ok: 'Available', exhausted: 'At limit', excluded: 'Paused', logged_out: 'Logged out' };
 
 function dur(ms: number): string {
   const m = Math.max(1, Math.ceil(ms / 60000));
@@ -146,16 +146,16 @@ function AccountRow({ a, now }: { a: Account; now: number }) {
         </span>
         <span className="acc-spacer" />
         {st === 'exhausted' && (
-          <button className="acc-act" disabled={busy} onClick={() => void run(() => api.clearAccount(a.id), 'Could not clear')}>
-            Clear
+          <button className="acc-act" disabled={busy} onClick={() => void run(() => api.clearAccount(a.id), 'Could not reset')}>
+            Reset limit
           </button>
         )}
         <button
           className="acc-act"
           disabled={busy}
-          onClick={() => void run(() => api.setExcluded(a.id, !excluded), excluded ? 'Could not include' : 'Could not exclude')}
+          onClick={() => void run(() => api.setExcluded(a.id, !excluded), excluded ? 'Could not resume' : 'Could not pause')}
         >
-          {excluded ? 'Include' : 'Exclude'}
+          {excluded ? 'Resume' : 'Pause account'}
         </button>
       </div>
       )}
@@ -280,7 +280,7 @@ export function AccountsPanel() {
                 ))}
                 <details className="acc-add">
                   <summary>+ Add an account</summary>
-                  <div className="acc-add-text">{ADD_HELP[k].text}</div>
+                  <div className="acc-add-text">Add another login — run this in a terminal, then come back:</div>
                   <CmdBox cmd={ADD_HELP[k].cmd} />
                 </details>
               </section>

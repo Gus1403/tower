@@ -64,15 +64,16 @@ export function Composer({ a }: { a: AgentSummary }) {
   const dead = a.status === 'stopped' || a.status === 'error';
   const disabled = readOnly || dead;
   const reason = readOnly
-    ? 'Observed from tmux — read-only'
+    ? 'Read-only session'
     : a.status === 'error'
       ? 'This agent hit an error'
       : a.status === 'stopped'
         ? a.resumable
-          ? 'Stopped — resume to continue'
-          : 'This agent was stopped'
+          ? 'Stopped — Resume to continue'
+          : 'Stopped'
         : null;
-  const hint = reason ?? (busy ? 'Queue a follow-up for when this turn ends' : 'Reply, / for commands');
+  const asking = a.status === 'needs_you' && (!!a.pendingPermission || (a.questions ?? []).length > 0);
+  const hint = reason ?? (asking ? 'Answer above, or reply…' : busy ? 'Queue a follow-up…' : 'Reply…');
   const queued = a.queued ?? [];
   const uploading = atts.some((x) => !x.id && !x.failed);
   const ready = atts.filter((x) => x.id);
@@ -330,13 +331,8 @@ export function Composer({ a }: { a: AgentSummary }) {
             <MicIcon />
           </button>
         )}
-        {busy && !disabled && canSend && (
-          <button className="btn btn-secondary btn-sm c-interrupt" disabled={!canSend} onClick={() => void send(true)} title="Interrupt & send (⌘/Ctrl+Enter)">
-            Interrupt &amp; send
-          </button>
-        )}
         {busy && !disabled ? (
-          <button className="btn btn-primary btn-sm c-queue" disabled={!canSend} onClick={() => void send(false)} title="Queue (Enter)">
+          <button className="btn btn-primary btn-sm c-queue" disabled={!canSend} onClick={() => void send(false)} title="Enter queues · ⌘Enter interrupts & sends">
             Queue
           </button>
         ) : (

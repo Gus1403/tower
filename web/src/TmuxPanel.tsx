@@ -147,7 +147,7 @@ export function TmuxPanel({ a, onNext, onPrev }: { a: AgentSummary; onNext?: () 
           </button>
         </div>
         <div className="panel-sub">
-          <code>{a.cwd}</code>
+          <code title={a.cwd}>{a.cwd.replace(/\/+$/, '').split('/').pop() || a.cwd}</code>
         </div>
       </div>
       <pre
@@ -172,7 +172,7 @@ export function TmuxPanel({ a, onNext, onPrev }: { a: AgentSummary; onNext?: () 
       {confirm ? (
         <div className="tmux-confirm" role="alertdialog" aria-label="Confirm send">
           <div className="tmux-confirm-text">
-            This types into a live session on eva-forge. Send?
+            This types into a live session. Send?
             <code>{confirm.kind === 'send' ? confirm.text : confirm.key}</code>
           </div>
           <label className="tmux-dontask">

@@ -87,3 +87,20 @@ button.f-tool:hover { border-color: var(--border-strong); }
 .move-acc-meta { flex: none; font-size: 12px; color: var(--text-3); }
 .move-empty { padding: 8px 10px; font-size: 13px; color: var(--text-2); }
 .more-menu { min-width: 210px; }
+.more-sep { height: 1px; background: var(--border); margin: 4px 2px; }
+.more-confirm { padding: 6px 8px; display: flex; flex-direction: column; gap: 8px; }
+.more-confirm-text { font-size: 13px; color: var(--text); }
+.more-confirm-btns { display: flex; gap: 6px; justify-content: flex-end; }
+.more-menu .more-confirm-btns button { display: inline-flex; width: auto; padding: 4px 10px; border-radius: 8px; }
+.more-menu .more-confirm-btns .more-keep { border: 1px solid var(--border); background: var(--bg); }
+.more-menu .more-confirm-btns .more-remove { background: var(--red); color: #fff; }
+.more-menu .more-confirm-btns .more-remove:hover { background: var(--red); filter: brightness(1.08); }
+.f-tool-raw-btn { margin-top: 6px; font: inherit; font-size: 11.5px; color: var(--text-2); background: none; border: 0; padding: 2px 0; cursor: pointer; }
+.f-tool-raw-btn:hover { color: var(--text); text-decoration: underline; }
+.f-tool-out .f-tool-out-detail { margin: 6px 0 0; color: var(--text-2); }
+.na-advanced { margin-top: 2px; }
+.na-advanced > summary { cursor: pointer; font-size: 12.5px; color: var(--text-2); list-style: none; padding: 4px 0; user-select: none; }
+.na-advanced > summary::-webkit-details-marker { display: none; }
+.na-advanced > summary::before { content: '▸'; display: inline-block; width: 14px; }
+.na-advanced[open] > summary::before { content: '▾'; }
+.na-advanced > .field { margin-top: 6px; }

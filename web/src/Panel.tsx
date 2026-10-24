@@ -1,12 +1,15 @@
 import { memo, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { AgentSummary, FeedItem } from '../../shared/contract';
 import { api, loadFeed } from './api';
-import { openAgent, patchAgentLocal, removeAgentLocal, toast, useAccounts, useNow, useStore } from './store';
+import { openAgent, patchAgentLocal, removeAgentLocal, toast, useAccounts, useStore } from './store';
+import { accountStatus } from './Accounts';
+import { PanelLinks } from './boards/Handoffs';
 import { Composer } from './composer/Composer';
 import { PanelQuestions } from './Questions';
 import { Markdown } from './feed/markdown';
 import './panel.css';
-import { KindBadge, PermissionButtons, StatusPill, ago } from './ui';
+import { KIND_LABEL, PermissionButtons, StatusPill } from './ui';
+const basename = (p: string) => p.replace(/\/+$/, '').split('/').pop() || p;
 
 const EMPTY: FeedItem[] = [];
 
@@ -65,6 +68,7 @@ function shortDetail(detail?: string): { cmd?: string; text?: string } {
 
 function ToolRow({ item }: { item: Extract<FeedItem, { type: 'tool_call' }> }) {
   const [open, setOpen] = useState(false);
+  const [raw, setRaw] = useState(false);
   const d = shortDetail(item.detail);
   const sameAsTitle = d.cmd && item.title.includes(d.cmd);
   if (d.text) {
@@ -75,7 +79,7 @@ function ToolRow({ item }: { item: Extract<FeedItem, { type: 'tool_call' }> }) {
   }
   return (
     <div className={`f-toolwrap ${open ? 'open' : ''}`}>
-      <button className={`f-tool f-tool-${item.status}`} title={item.detail} onClick={() => setOpen((o) => !o)} aria-expanded={open}>
+      <button className={`f-tool f-tool-${item.status}`} onClick={() => setOpen((o) => !o)} aria-expanded={open}>
         <ToolStatusIcon status={item.status} />
         {d.cmd && !sameAsTitle ? (
           <span className="f-tool-title">
@@ -89,8 +93,13 @@ function ToolRow({ item }: { item: Extract<FeedItem, { type: 'tool_call' }> }) {
       </button>
       {open && (
         <div className="f-tool-out">
-          {item.detail && <div className="f-tool-out-detail">{item.detail}</div>}
           <pre>{item.output || (item.status === 'completed' || item.status === 'failed' ? 'No output' : 'Running…')}</pre>
+          {item.detail && (
+            <button className="f-tool-raw-btn" aria-expanded={raw} onClick={() => setRaw((r) => !r)}>
+              {raw ? 'Hide raw' : 'Raw'}
+            </button>
+          )}
+          {raw && item.detail && <pre className="f-tool-out-detail">{item.detail}</pre>}
         </div>
       )}
     </div>
@@ -137,6 +146,8 @@ function humanStatus(t: string): string {
   if (/^turn ended:\s*max_tokens$/.test(low)) return 'Stopped: output limit reached';
   if (/^turn ended:\s*refusal$/.test(low)) return 'The agent declined';
   if (/^turn ended:\s*max_turn_requests$/.test(low)) return 'Stopped: turn limit reached';
+  if (/^turn ended\b/.test(low)) return 'Finished';
+  if (!s || /^[\w.-]+:\s*[\w.-]*$/.test(s) && /_/.test(s)) return 'Status update';
   return s;
 }
 
@@ -260,7 +271,7 @@ function ControlBar({ a }: { a: AgentSummary }) {
 }
 
 function MovePicker({ a, onClose }: { a: AgentSummary; onClose: () => void }) {
-  const accounts = useAccounts().filter((x) => x.kind === a.kind && x.loggedIn === true && x.id !== a.accountId);
+  const accounts = useAccounts().filter((x) => x.kind === a.kind && x.id !== a.accountId && accountStatus(x) === 'ok');
   const [busy, setBusy] = useState<string | null>(null);
   const go = async (accountId: string) => {
     setBusy(accountId);
@@ -275,15 +286,15 @@ function MovePicker({ a, onClose }: { a: AgentSummary; onClose: () => void }) {
     }
   };
   return (
-    <div className="move-picker" role="listbox" aria-label="Continue on account">
+    <div className="move-picker" role="listbox" aria-label="Move to another account">
       <div className="move-head">
-        <span>Continue on</span>
+        <span>Move to another account</span>
         <button className="icon-btn move-x" aria-label="Cancel" onClick={onClose}>
           ✕
         </button>
       </div>
       {accounts.length === 0 ? (
-        <div className="move-empty">No other logged-in {a.kind} account. Log one in from Accounts.</div>
+        <div className="move-empty">No other available {KIND_LABEL[a.kind]} account. Add one from Accounts.</div>
       ) : (
         accounts.map((acc) => (
           <button key={acc.id} role="option" aria-selected={false} className="move-acc" disabled={!!busy} onClick={() => void go(acc.id)}>
@@ -305,7 +316,7 @@ function LimitBanner({ a, picking, setPicking }: { a: AgentSummary; picking: boo
           <span className="limit-text">This account hit its limit</span>
           {!picking && (
             <button className="btn btn-primary btn-sm limit-move" onClick={() => setPicking(true)}>
-              Continue on another account
+              Move to another account
             </button>
           )}
         </div>
@@ -317,6 +328,7 @@ function LimitBanner({ a, picking, setPicking }: { a: AgentSummary; picking: boo
 
 function MoreMenu({ a, onMove }: { a: AgentSummary; onMove: () => void }) {
   const [open, setOpen] = useState(false);
+  const [confirm, setConfirm] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!open) return;
@@ -324,7 +336,11 @@ function MoreMenu({ a, onMove }: { a: AgentSummary; onMove: () => void }) {
     document.addEventListener('mousedown', close);
     return () => document.removeEventListener('mousedown', close);
   }, [open]);
+  useEffect(() => {
+    if (!open) setConfirm(false);
+  }, [open]);
   if (a.source !== 'tower') return null;
+  const working = a.status === 'working';
   return (
     <div className="more" ref={ref}>
       <button className="icon-btn" aria-label="More" aria-expanded={open} onClick={() => setOpen((o) => !o)}>
@@ -332,6 +348,19 @@ function MoreMenu({ a, onMove }: { a: AgentSummary; onMove: () => void }) {
       </button>
       {open && (
         <div className="more-menu" role="menu">
+          {working && (
+            <button
+              role="menuitem"
+              className="more-interrupt"
+              title="Cancel the current turn; the agent stays alive"
+              onClick={() => {
+                setOpen(false);
+                api.interrupt(a.id).catch((e: Error) => toast(`Could not interrupt: ${e.message}`));
+              }}
+            >
+              Interrupt
+            </button>
+          )}
           <button
             role="menuitem"
             className="more-move"
@@ -340,7 +369,7 @@ function MoreMenu({ a, onMove }: { a: AgentSummary; onMove: () => void }) {
               onMove();
             }}
           >
-            Continue on another account
+            Move to another account
           </button>
           <button
             role="menuitem"
@@ -358,20 +387,33 @@ function MoreMenu({ a, onMove }: { a: AgentSummary; onMove: () => void }) {
           >
             {a.archived ? 'Unarchive' : 'Archive'}
           </button>
-          <button
-            role="menuitem"
-            className="more-danger"
-            onClick={() => {
-              setOpen(false);
-              if (!window.confirm(`Remove "${a.name}"? This stops it if running and deletes the card.`)) return;
-              api
-                .remove(a.id)
-                .then(() => removeAgentLocal(a.id))
-                .catch((e: Error) => toast(`Could not remove: ${e.message}`));
-            }}
-          >
-            Remove card
-          </button>
+          <div className="more-sep" />
+          {confirm ? (
+            <div className="more-confirm" role="group" aria-label="Confirm remove">
+              <span className="more-confirm-text">Remove this agent?</span>
+              <div className="more-confirm-btns">
+                <button className="btn btn-secondary btn-sm more-keep" onClick={() => setConfirm(false)}>
+                  Keep
+                </button>
+                <button
+                  className="btn btn-sm more-remove"
+                  onClick={() => {
+                    setOpen(false);
+                    api
+                      .remove(a.id)
+                      .then(() => removeAgentLocal(a.id))
+                      .catch((e: Error) => toast(`Could not remove: ${e.message}`));
+                  }}
+                >
+                  Remove
+                </button>
+              </div>
+            </div>
+          ) : (
+            <button role="menuitem" className="more-danger" onClick={() => setConfirm(true)}>
+              Remove
+            </button>
+          )}
         </div>
       )}
     </div>
@@ -381,7 +423,6 @@ function MoreMenu({ a, onMove }: { a: AgentSummary; onMove: () => void }) {
 export function Panel() {
   const id = useStore((s) => s.openId);
   const a = useStore((s) => (s.openId ? s.agents[s.openId] : undefined));
-  const now = useNow();
   const [picking, setPicking] = useState(false);
 
   useEffect(() => {
@@ -403,17 +444,7 @@ export function Panel() {
         <div className="panel-row">
           <span className="panel-name">{a.name}</span>
           <StatusPill status={a.status} />
-          <KindBadge kind={a.kind} />
           <span className="spacer" />
-          {a.source === 'tower' && a.status === 'working' && (
-            <button
-              className="btn btn-secondary btn-sm b-interrupt"
-              onClick={() => api.interrupt(a.id).catch((e: Error) => toast(`Could not interrupt: ${e.message}`))}
-              title="Cancel the current turn; the agent stays alive"
-            >
-              Interrupt
-            </button>
-          )}
           {canStop && (
             <button
               className="btn btn-secondary btn-sm"
@@ -428,10 +459,14 @@ export function Panel() {
           </button>
         </div>
         <div className="panel-sub">
-          <code>{a.cwd}</code>
+          {basename(a.cwd) !== a.name && <code title={a.cwd}>{basename(a.cwd)}</code>}
+          <span className="muted" title={a.cwd}>
+            {basename(a.cwd) !== a.name ? '· ' : ''}
+            {KIND_LABEL[a.kind]}
+          </span>
           {a.model && <span className="muted">· {a.model}</span>}
-          <span className="muted">· {ago(now - a.createdAt)}</span>
         </div>
+        <PanelLinks agent={a} />
         <ControlBar a={a} />
       </div>
       {a.plan && a.plan.length > 0 && (
