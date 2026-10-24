@@ -40,7 +40,14 @@ export function createServer(manager: AgentManager, token: string) {
 
   const send = (ev: ServerEvent) => {
     const data = JSON.stringify(ev);
-    for (const ws of clients) if (ws.readyState === ws.OPEN) ws.send(data);
+    for (const ws of clients) {
+      if (ws.readyState !== ws.OPEN) continue;
+      try {
+        ws.send(data);
+      } catch {
+        clients.delete(ws);
+      }
+    }
   };
   manager.on('agent', (agent) => send({ type: 'agent', agent }));
   manager.on('feed', (agentId, item) => send({ type: 'feed', agentId, item }));
@@ -65,7 +72,10 @@ export function createServer(manager: AgentManager, token: string) {
       let data = '';
       req.on('data', (c) => {
         data += c;
-        if (data.length > 1_000_000) reject(new Error('body too large'));
+        if (data.length > 1_000_000) {
+          req.destroy();
+          reject(new Error('body too large'));
+        }
       });
       req.on('end', () => {
         if (!data) return resolve({});
@@ -132,8 +142,8 @@ export function createServer(manager: AgentManager, token: string) {
         if (body.name != null && typeof body.name !== 'string') {
           return json(res, 400, { error: 'name must be a string' });
         }
-        if (body.model != null && typeof body.model !== 'string') {
-          return json(res, 400, { error: 'model must be a string' });
+        if (body.model != null && (typeof body.model !== 'string' || !/^[A-Za-z0-9._:-]{1,64}$/.test(body.model))) {
+          return json(res, 400, { error: 'model must match /^[A-Za-z0-9._:-]{1,64}$/' });
         }
         const agent = await manager.launch({
           kind: body.kind as LaunchRequest['kind'],
@@ -147,6 +157,9 @@ export function createServer(manager: AgentManager, token: string) {
       const actMatch = p.match(/^\/api\/agents\/([^/]+)\/(prompt|permission|stop)$/);
       if (req.method === 'POST' && actMatch) {
         const [, id, action] = actMatch;
+        if (manager.isObserved(id)) {
+          return json(res, 409, { error: 'observed tmux agents are read-only' });
+        }
         if (!manager.getAgent(id)) return json(res, 404, { error: 'no such agent' });
         if (action === 'prompt') {
           const body = (await readBody(req)) as { text?: unknown };

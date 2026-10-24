@@ -16,6 +16,9 @@ const workDir = path.resolve(
 );
 const stuckMs = Number(process.env.TOWER_STUCK_MS || 300000);
 
+process.on('unhandledRejection', (err) => console.error('[tower] unhandledRejection:', err));
+process.on('uncaughtException', (err) => console.error('[tower] uncaughtException:', err));
+
 const manager = new AgentManager({ workDir, stuckMs });
 const server = createServer(manager, token);
 

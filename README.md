@@ -27,6 +27,14 @@ board above every agent on your own machine — your repos, your secrets, the su
 - **Capacity chips**: which agent kinds are installed, logged in and running.
 - **Observed sessions**: existing tmux agent sessions on the host appear as read-only cards.
 
+## Screenshots
+
+| Board with the Needs-you inbox | Agent panel: plan + live feed | Phone |
+|---|---|---|
+| ![board](web/verify/out/a-desktop-board.png) | ![panel](web/verify/out/b-desktop-panel.png) | ![phone](web/verify/out/d-phone-board.png) |
+
+(Captured headless by `web/verify/verify.mjs` in mock mode.)
+
 ## Architecture
 
 ```
@@ -56,7 +64,17 @@ Environment: `TOWER_TOKEN` (required), `TOWER_HOST` (default `127.0.0.1`), `TOWE
 
 Tower can run coding agents on the machine it lives on, so it binds to loopback or a private (Tailscale) address,
 requires a bearer token on every request and the WebSocket, and confines each agent's file reads and writes to its
-own work folder. Never expose it to the public internet.
+own work folder. Agents are spawned without any `TOWER_*` variable in their environment. Known limitation: agents
+run as the same OS user as Tower, so a determined agent could read Tower's env file; run Tower under its own user
+for stronger isolation. Never expose it to the public internet.
+
+## Agent notes (from real ACP probes)
+
+| Agent | Launch | Asks permission when |
+|---|---|---|
+| Devin | `devin acp` | mode `accept-edits` (default): shell commands ask, file edits are auto-approved |
+| Claude Code | `claude-agent-acp` | session created in mode `default` with skip-permissions disabled |
+| Codex | `codex-acp` | mode `read-only`: asks before running commands |
 
 ## How it was built
 

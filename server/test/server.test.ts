@@ -274,6 +274,17 @@ test('crash: agent process exiting -> error status with stderr', async () => {
   assert.match(err.error ?? '', /exited|crashing on purpose/i);
 });
 
+test('stop during starting: stays stopped, never flips to error', async () => {
+  const res = await launch('devin', 'stop me early');
+  const agent = (await res.json()) as AgentSummary;
+  const stop = await fetch(`${BASE}/api/agents/${agent.id}/stop`, { method: 'POST', headers: AUTH });
+  assert.equal(stop.status, 200);
+  // give the spawn/exit handlers time to (not) clobber the status
+  await new Promise((r) => setTimeout(r, 1500));
+  const s = lastSummary(agent.id);
+  assert.equal(s?.status, 'stopped');
+});
+
 test('permission: unknown requestId -> 404', async () => {
   const res = await launch('devin', 'perm test');
   const agent = (await res.json()) as AgentSummary;

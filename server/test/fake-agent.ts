@@ -74,9 +74,22 @@ const agent: acp.Agent = {
         { content: 'report back', status: 'in_progress', priority: 'medium' },
       ],
     });
+    // like devin: tool_call first, then a bare requestPermission carrying only
+    // toolCallId + _meta — the client must recover title/detail from the tool_call
+    await upd({
+      sessionUpdate: 'tool_call',
+      toolCallId: 'tc-2',
+      title: 'Write file out.txt',
+      kind: 'edit',
+      status: 'pending',
+      rawInput: { path: 'out.txt' },
+    });
     const perm = await conn.requestPermission({
       sessionId,
-      toolCall: { toolCallId: 'tc-2', title: 'Write file out.txt', kind: 'edit', rawInput: { path: 'out.txt' } },
+      toolCall: {
+        toolCallId: 'tc-2',
+        _meta: { 'cognition.ai/editableCommand': 'write out.txt' },
+      },
       options: [
         { optionId: 'allow-1', name: 'Allow once', kind: 'allow_once' },
         { optionId: 'deny-1', name: 'Reject', kind: 'reject_once' },
@@ -86,10 +99,8 @@ const agent: acp.Agent = {
       return { stopReason: 'cancelled' };
     }
     await upd({
-      sessionUpdate: 'tool_call',
+      sessionUpdate: 'tool_call_update',
       toolCallId: 'tc-2',
-      title: 'Write file out.txt',
-      kind: 'edit',
       status: 'completed',
     });
     await upd({

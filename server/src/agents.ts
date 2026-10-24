@@ -1,9 +1,9 @@
 import { EventEmitter } from 'node:events';
-import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { spawn, spawnSync, execFile, type ChildProcess } from 'node:child_process';
 import { Readable, Writable } from 'node:stream';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, createHash } from 'node:crypto';
 import { existsSync, mkdirSync, realpathSync } from 'node:fs';
-import { readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as acp from '@agentclientprotocol/sdk';
@@ -19,9 +19,12 @@ import type {
 } from '../../shared/contract.js';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
+const TMUX_LIST = path.join(REPO_ROOT, 'probes', 'tmux-list.sh');
 const FEED_CAP = 2000;
 const STDERR_CAP = 200;
 const STUCK_CHECK_MS = 5000;
+const CAPACITY_REFRESH_MS = 60_000;
+const TMUX_POLL_MS = 15_000;
 
 const KIND_LABEL: Record<AgentKind, string> = {
   devin: 'Devin',
@@ -73,6 +76,10 @@ interface PendingPermission {
   resolve: (r: acp.RequestPermissionResponse) => void;
 }
 
+interface TmuxEntry {
+  summary: AgentSummary;
+}
+
 interface ToolState {
   title?: string;
   kind?: string;
@@ -88,11 +95,12 @@ interface AgentEntry {
   sessionId?: string;
   feed: FeedItem[];
   tools: Map<string, ToolState>;
-  pending?: PendingPermission;
+  pendingQueue: PendingPermission[];
   stderr: string[];
   lastMsgId: Partial<Record<'agent_message' | 'thought' | 'user_message', string>>;
   lastUpdateKind?: string;
   turnRunning: boolean;
+  turnPromise?: Promise<void>;
   stopping: boolean;
   errored: boolean;
 }
@@ -116,6 +124,14 @@ export class AgentManager extends EventEmitter {
   private lastCapacityJson = '';
   private loggedUnknown = new Set<string>();
   private timer?: NodeJS.Timeout;
+  private capTimer?: NodeJS.Timeout;
+  private tmuxTimer?: NodeJS.Timeout;
+  private capExtra: Partial<Record<AgentKind, { available?: boolean; detail?: string }>> = {};
+  private tmuxAgents = new Map<string, TmuxEntry>(); // keyed by id
+  private tmuxNums = new Map<string, number>(); // session -> stable n
+  private tmuxNextN = 1;
+  private tmuxPolling = false;
+  private capRefreshing = false;
 
   constructor(opts: { workDir: string; stuckMs: number }) {
     super();
@@ -124,6 +140,17 @@ export class AgentManager extends EventEmitter {
     mkdirSync(this.workDir, { recursive: true });
     this.timer = setInterval(() => this.checkStuck(), STUCK_CHECK_MS);
     this.timer.unref();
+    this.capTimer = setInterval(
+      () => this.refreshCapacityDetails().catch(() => {}),
+      CAPACITY_REFRESH_MS,
+    );
+    this.capTimer.unref();
+    this.refreshCapacityDetails().catch(() => {});
+    if (process.env.TOWER_TMUX !== '0') {
+      this.tmuxTimer = setInterval(() => this.pollTmux().catch(() => {}), TMUX_POLL_MS);
+      this.tmuxTimer.unref();
+      this.pollTmux().catch(() => {});
+    }
     this.broadcastCapacity();
   }
 
@@ -190,9 +217,11 @@ export class AgentManager extends EventEmitter {
       cwd,
       feed: [],
       tools: new Map(),
+      pendingQueue: [],
       stderr: [],
       lastMsgId: {},
       turnRunning: false,
+      turnPromise: undefined,
       stopping: false,
       errored: false,
     };
@@ -200,6 +229,7 @@ export class AgentManager extends EventEmitter {
     this.emit('agent', e.summary);
     this.broadcastCapacity();
     this.startProcess(e, req).catch((err) => {
+      if (e.stopping) return;
       e.errored = true;
       const tail = e.stderr.slice(-20).join('\n');
       const msg = oneLine(`${String(err?.message ?? err)}${tail ? `: ${tail}` : ''}`, 400);
@@ -211,17 +241,24 @@ export class AgentManager extends EventEmitter {
   private async startProcess(e: AgentEntry, req: LaunchRequest): Promise<void> {
     const cmd = this.commandFor(req.kind, req.model);
     console.log(`[tower] spawn agent ${e.summary.id} (${req.kind}): ${cmd.join(' ')}`);
+    const childEnv = Object.fromEntries(
+      Object.entries(process.env).filter(([k]) => !k.startsWith('TOWER_')),
+    ) as NodeJS.ProcessEnv;
     let proc: ChildProcess;
     try {
       proc = spawn(cmd[0], cmd.slice(1), {
         cwd: e.cwd,
         stdio: ['pipe', 'pipe', 'pipe'],
-        env: process.env,
+        env: childEnv,
       });
     } catch (err) {
       throw new Error(`spawn failed: ${String(err)}`);
     }
     e.proc = proc;
+    if (e.stopping) {
+      proc.kill('SIGKILL');
+      return;
+    }
     proc.stderr!.setEncoding('utf8');
     proc.stderr!.on('data', (d: string) => {
       for (const line of d.split('\n')) {
@@ -231,6 +268,7 @@ export class AgentManager extends EventEmitter {
       }
     });
     proc.on('error', (err) => {
+      if (e.stopping) return;
       e.errored = true;
       this.setStatus(e, 'error', { error: `spawn error: ${err.message}` });
     });
@@ -238,11 +276,24 @@ export class AgentManager extends EventEmitter {
       if (e.stopping) return;
       if (e.errored || e.summary.status === 'error') return;
       const tail = e.stderr.slice(-20).join('\n');
-      e.errored = true;
       this.cancelPending(e);
-      this.setStatus(e, 'error', {
-        error: oneLine(`process exited (code ${code}, signal ${signal})${tail ? ': ' + tail : ''}`, 400),
-      });
+      const s = e.summary.status;
+      if (s === 'starting' || s === 'working' || s === 'needs_you' || s === 'stuck') {
+        e.errored = true;
+        this.setStatus(e, 'error', {
+          error: oneLine(
+            `process exited (code ${code}, signal ${signal})${tail ? ': ' + tail : ''}`,
+            400,
+          ),
+        });
+      } else {
+        this.pushFeed(e, {
+          type: 'status',
+          id: this.nid('st'),
+          at: Date.now(),
+          text: 'Agent process exited',
+        });
+      }
     });
 
     const stream = acp.ndJsonStream(
@@ -259,19 +310,40 @@ export class AgentManager extends EventEmitter {
     });
     const authMethods = (init as { authMethods?: Array<{ id: string }> }).authMethods ?? [];
 
+    const sessionReq: acp.NewSessionRequest = { cwd: e.cwd, mcpServers: [] };
+    if (req.kind === 'claude') {
+      sessionReq._meta = { claudeCode: { options: { allowDangerouslySkipPermissions: false } } };
+    }
     let session;
     try {
-      session = await conn.newSession({ cwd: e.cwd, mcpServers: [] });
+      session = await conn.newSession(sessionReq);
     } catch (err) {
       if (authMethods.length > 0) {
         console.log(`[tower] agent ${e.summary.id} requires auth, trying ${authMethods[0].id}`);
         await conn.authenticate({ methodId: authMethods[0].id });
-        session = await conn.newSession({ cwd: e.cwd, mcpServers: [] });
+        session = await conn.newSession(sessionReq);
       } else {
         throw err;
       }
     }
     e.sessionId = session.sessionId;
+
+    const modeDefault: Record<AgentKind, string> = {
+      devin: 'accept-edits',
+      claude: 'default',
+      codex: 'read-only',
+    };
+    const wantMode = process.env[`TOWER_MODE_${req.kind.toUpperCase()}`] ?? modeDefault[req.kind];
+    const offered = (
+      session as { modes?: { availableModes?: Array<{ id: string }> } }
+    ).modes?.availableModes?.map((m) => m.id);
+    if (wantMode && offered?.includes(wantMode)) {
+      try {
+        await conn.setSessionMode({ sessionId: e.sessionId, modeId: wantMode });
+      } catch (err) {
+        console.log(`[tower] agent ${e.summary.id}: setSessionMode ${wantMode} failed: ${err}`);
+      }
+    }
     this.pushFeed(e, { type: 'status', id: this.nid('st'), at: Date.now(), text: 'Started' });
     await this.runPrompt(e, req.task);
   }
@@ -283,6 +355,7 @@ export class AgentManager extends EventEmitter {
       readTextFile: async (params) => ({ content: await this.guardedRead(e, params.path) }),
       writeTextFile: async (params) => {
         this.guardPath(e, params.path);
+        await mkdir(path.dirname(params.path), { recursive: true });
         await writeFile(params.path, params.content, 'utf8');
         return {};
       },
@@ -403,12 +476,21 @@ export class AgentManager extends EventEmitter {
     params: acp.RequestPermissionRequest,
   ): Promise<acp.RequestPermissionResponse> {
     const tc = params.toolCall;
+    // Some agents (devin) send only toolCallId + _meta; recover title/kind/detail
+    // from the stored tool_call state that arrived moments earlier.
+    const stored = tc?.toolCallId ? e.tools.get(tc.toolCallId) : undefined;
+    const meta = tc?._meta as Record<string, unknown> | undefined;
+    const editableCommand = meta?.['cognition.ai/editableCommand'];
     const request: PermissionRequest = {
       requestId: newId(8),
       agentId: e.summary.id,
-      title: tc?.title ?? 'Permission requested',
-      toolKind: tc?.kind ?? undefined,
-      detail: preview(tc?.rawInput) ?? preview(tc?.content),
+      title: tc?.title ?? stored?.title ?? 'Permission requested',
+      toolKind: tc?.kind ?? stored?.kind ?? undefined,
+      detail:
+        preview(tc?.rawInput) ??
+        preview(tc?.content) ??
+        (typeof editableCommand === 'string' ? preview(editableCommand) : undefined) ??
+        stored?.detail,
       options: (params.options ?? []).map((o) => ({
         optionId: o.optionId,
         name: o.name,
@@ -417,9 +499,9 @@ export class AgentManager extends EventEmitter {
       createdAt: Date.now(),
     };
     return new Promise<acp.RequestPermissionResponse>((resolve) => {
-      e.pending = { request, resolve };
-      e.summary.pendingPermission = request;
-      this.setStatus(e, 'needs_you');
+      e.pendingQueue.push({ request, resolve });
+      // only the queue head is surfaced in pendingPermission; all get feed items
+      if (e.pendingQueue.length === 1) e.summary.pendingPermission = request;
       this.pushFeed(e, {
         type: 'permission',
         id: `perm-${request.requestId}`,
@@ -427,16 +509,19 @@ export class AgentManager extends EventEmitter {
         requestId: request.requestId,
         title: request.title,
       });
+      if (e.summary.status !== 'needs_you') this.setStatus(e, 'needs_you');
+      else this.emit('agent', e.summary);
     });
   }
 
   private cancelPending(e: AgentEntry) {
-    if (!e.pending) return;
-    const p = e.pending;
-    e.pending = undefined;
+    const queue = e.pendingQueue;
+    e.pendingQueue = [];
     e.summary.pendingPermission = undefined;
-    p.resolve({ outcome: { outcome: 'cancelled' } });
-    this.resolvePermissionFeed(e, p.request.requestId, 'cancelled');
+    for (const p of queue) {
+      p.resolve({ outcome: { outcome: 'cancelled' } });
+      this.resolvePermissionFeed(e, p.request.requestId, 'cancelled');
+    }
   }
 
   private resolvePermissionFeed(e: AgentEntry, requestId: string, resolution: string) {
@@ -447,18 +532,25 @@ export class AgentManager extends EventEmitter {
 
   answerPermission(agentId: string, requestId: string, optionId: string): 'ok' | 'notfound' {
     const e = this.agents.get(agentId);
-    if (!e?.pending || e.pending.request.requestId !== requestId) return 'notfound';
-    const p = e.pending;
-    e.pending = undefined;
-    e.summary.pendingPermission = undefined;
+    const idx = e?.pendingQueue.findIndex((p) => p.request.requestId === requestId) ?? -1;
+    if (!e || idx < 0) return 'notfound';
+    const [p] = e.pendingQueue.splice(idx, 1);
     p.resolve({ outcome: { outcome: 'selected', optionId } });
     const name = p.request.options.find((o) => o.optionId === optionId)?.name ?? optionId;
     this.resolvePermissionFeed(e, requestId, name);
-    this.setStatus(e, 'working');
+    e.summary.pendingPermission = e.pendingQueue[0]?.request;
+    if (e.pendingQueue.length === 0) this.setStatus(e, 'working');
+    else this.emit('agent', e.summary); // still needs_you, next request surfaced
     return 'ok';
   }
 
-  private async runPrompt(e: AgentEntry, text: string): Promise<void> {
+  private runPrompt(e: AgentEntry, text: string): Promise<void> {
+    const p = this.runPromptInner(e, text);
+    e.turnPromise = p;
+    return p;
+  }
+
+  private async runPromptInner(e: AgentEntry, text: string): Promise<void> {
     if (!e.conn || !e.sessionId) throw new Error('agent not ready');
     e.turnRunning = true;
     e.lastUpdateKind = undefined;
@@ -492,7 +584,23 @@ export class AgentManager extends EventEmitter {
     const e = this.agents.get(agentId);
     if (!e) return 'notfound';
     if (e.summary.status !== 'done' && e.summary.status !== 'stuck') return 'conflict';
-    this.runPrompt(e, text).catch(() => {});
+    void (async () => {
+      if (e.turnRunning) {
+        // stuck: a stale turn is still in flight — cancel it and wait before re-prompting
+        try {
+          await e.conn?.cancel({ sessionId: e.sessionId! });
+        } catch {
+          /* ignore */
+        }
+        try {
+          await Promise.race([e.turnPromise, new Promise((r) => setTimeout(r, 10_000))]);
+        } catch {
+          /* ignore */
+        }
+        if (e.stopping || e.errored) return;
+      }
+      this.runPrompt(e, text).catch(() => {});
+    })();
     return 'ok';
   }
 
@@ -552,8 +660,149 @@ export class AgentManager extends EventEmitter {
       const running = [...this.agents.values()].filter(
         (a) => a.summary.kind === kind && a.summary.status !== 'stopped' && a.summary.status !== 'error',
       ).length;
-      return { kind, label: KIND_LABEL[kind], available: onPath(cmd[0]), running };
+      const extra = this.capExtra[kind] ?? {};
+      return {
+        kind,
+        label: KIND_LABEL[kind],
+        available: extra.available ?? onPath(cmd[0]),
+        running,
+        detail: extra.detail,
+      };
     });
+  }
+
+  private run(cmd: string, args: string[], timeoutMs = 5000): Promise<string> {
+    return new Promise((resolve, reject) => {
+      execFile(cmd, args, { timeout: timeoutMs, maxBuffer: 256 * 1024 }, (err, stdout, stderr) => {
+        if (err) reject(err);
+        else resolve((stdout + stderr).trim());
+      });
+    });
+  }
+
+  private stripEmails(s: string): string {
+    return s.replace(/\S+@\S+\.\S+/g, '***').trim();
+  }
+
+  private async refreshCapacityDetails(): Promise<void> {
+    if (this.capRefreshing) return;
+    this.capRefreshing = true;
+    try {
+      await this.refreshCapacityDetailsInner();
+    } finally {
+      this.capRefreshing = false;
+    }
+  }
+
+  private async refreshCapacityDetailsInner(): Promise<void> {
+    const next: typeof this.capExtra = {};
+    await Promise.all([
+      (async () => {
+        try {
+          const out = await this.run('devin', ['auth', 'status']);
+          const first = this.stripEmails(out.split('\n')[0] ?? '');
+          next.devin = { detail: first || undefined, available: !/not logged in/i.test(out) };
+        } catch {
+          next.devin = { available: onPath('devin') };
+        }
+      })(),
+      (async () => {
+        try {
+          const out = await this.run('claude', ['auth', 'status']);
+          const j = JSON.parse(out) as { loggedIn?: boolean; subscriptionType?: string };
+          next.claude = {
+            available: j.loggedIn === true,
+            detail: j.loggedIn
+              ? `${j.subscriptionType ?? 'account'} · logged in`
+              : 'not logged in',
+          };
+        } catch {
+          next.claude = { available: onPath('claude') };
+        }
+      })(),
+      (async () => {
+        // NEVER via ~/.local/bin/codex (subswitch shim refuses bare login commands)
+        const bin = existsSync('/usr/bin/codex') ? '/usr/bin/codex' : 'codex';
+        try {
+          const out = await this.run(bin, ['login', 'status']);
+          const first = this.stripEmails(out.split('\n')[0] ?? '');
+          next.codex = { detail: first || undefined, available: !/not logged in/i.test(out) };
+        } catch {
+          next.codex = { available: undefined };
+        }
+      })(),
+    ]);
+    this.capExtra = next;
+    this.broadcastCapacity();
+  }
+
+  private async pollTmux(): Promise<void> {
+    if (this.tmuxPolling) return;
+    this.tmuxPolling = true;
+    try {
+      await this.pollTmuxInner();
+    } finally {
+      this.tmuxPolling = false;
+    }
+  }
+
+  private async pollTmuxInner(): Promise<void> {
+    let out: string;
+    try {
+      out = await this.run('bash', [TMUX_LIST]);
+    } catch {
+      if (this.tmuxAgents.size) {
+        this.tmuxAgents.clear();
+      }
+      return;
+    }
+    const redact = process.env.TOWER_TMUX_REDACT !== '0';
+    const bySession = new Map<string, { kind: AgentKind; activity: number }>();
+    for (const line of out.split('\n')) {
+      if (!line.trim()) continue;
+      const [sess, , , , act, agent] = line.split('\t');
+      if (!sess || agent === '-' || !agent) continue;
+      const kind = agent as AgentKind;
+      if (!KIND_LABEL[kind]) continue;
+      const activity = (Number(act) || 0) * 1000;
+      const cur = bySession.get(sess);
+      if (!cur || activity > cur.activity) bySession.set(sess, { kind, activity });
+    }
+    const seen = new Set<string>();
+    const changed: AgentSummary[] = [];
+    for (const [sess, info] of bySession) {
+      const id = `tmux-${createHash('sha1').update(sess).digest('hex').slice(0, 6)}`;
+      seen.add(id);
+      if (redact && !this.tmuxNums.has(sess)) {
+        this.tmuxNums.set(sess, this.tmuxNextN);
+        this.tmuxNextN += 1;
+      }
+      const label = KIND_LABEL[info.kind];
+      const summary: AgentSummary = {
+        id,
+        kind: info.kind,
+        name: redact ? `${label} session ${this.tmuxNums.get(sess)}` : sess,
+        task: redact ? 'Existing tmux session' : sess,
+        cwd: '',
+        source: 'tmux',
+        status: 'observed',
+        createdAt: info.activity || Date.now(),
+        lastActivityAt: info.activity || Date.now(),
+        toolCalls: 0,
+      };
+      const prev = this.tmuxAgents.get(id);
+      const prevJson = prev ? JSON.stringify(prev.summary) : '';
+      if (JSON.stringify(summary) !== prevJson) {
+        this.tmuxAgents.set(id, { summary });
+        changed.push(summary);
+      }
+    }
+    for (const id of [...this.tmuxAgents.keys()]) {
+      if (!seen.has(id)) {
+        this.tmuxAgents.delete(id);
+      }
+    }
+    for (const s of changed) this.emit('agent', s);
   }
 
   private broadcastCapacity() {
@@ -565,7 +814,11 @@ export class AgentManager extends EventEmitter {
   }
 
   getAgent(id: string): AgentSummary | undefined {
-    return this.agents.get(id)?.summary;
+    return this.agents.get(id)?.summary ?? this.tmuxAgents.get(id)?.summary;
+  }
+
+  isObserved(id: string): boolean {
+    return this.tmuxAgents.has(id);
   }
 
   getFeed(id: string): FeedItem[] | undefined {
@@ -574,7 +827,10 @@ export class AgentManager extends EventEmitter {
 
   state(host: string): { agents: AgentSummary[]; capacity: Capacity[]; host: string } {
     return {
-      agents: [...this.agents.values()].map((a) => a.summary),
+      agents: [
+        ...[...this.agents.values()].map((a) => a.summary),
+        ...[...this.tmuxAgents.values()].map((t) => t.summary),
+      ],
       capacity: this.capacityList(),
       host,
     };
@@ -582,5 +838,7 @@ export class AgentManager extends EventEmitter {
 
   shutdown() {
     if (this.timer) clearInterval(this.timer);
+    if (this.capTimer) clearInterval(this.capTimer);
+    if (this.tmuxTimer) clearInterval(this.tmuxTimer);
   }
 }
