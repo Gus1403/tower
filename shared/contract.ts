@@ -66,6 +66,28 @@ export interface AgentSummary {
   configOptions?: ConfigOption[]; // e.g. model, effort, thought_level (newSession.configOptions / config_option_update)
   accountId?: string; // Account.id the agent was launched with
   resumable?: boolean; // persisted from a previous server run; POST /resume reloads it (ACP loadSession)
+  // ---- Wave B additions ----
+  questions?: Question[]; // open questions the agent asked with `tower ask` (status needs_you while any is open)
+  commands?: { name: string; description?: string }[]; // ACP available_commands_update ("/" menu)
+  archived?: boolean; // hidden from the board, listed under Archived
+  limitHit?: boolean; // the last error/stop looked like a usage limit (429, quota, "limit") -> offer "Continue on another account"
+  interactive?: boolean; // tmux cards only: true when TOWER_TMUX_INTERACTIVE=1 (send/key/screen allowed)
+}
+
+export interface Question {
+  id: string;
+  agentId: string;
+  text: string;
+  recommendation?: string;
+  createdAt: number;
+}
+
+export interface Note {
+  id: string;
+  title: string;
+  body: string;
+  createdAt: number;
+  archived?: boolean;
 }
 
 export interface ConfigOption {
@@ -126,6 +148,7 @@ export interface StateResponse {
   agents: AgentSummary[];
   capacity: Capacity[];
   accounts: Account[];
+  notes: Note[];
   host: string; // os.hostname()
 }
 
@@ -145,6 +168,22 @@ export interface StateResponse {
 // POST /api/agents/:id/resume             -> 202: for resumable agents, spawn + loadSession(sessionId) on the same account
 // DELETE /api/agents/:id                  -> 200: stops if live and removes the card (tower agents only)
 // GET  /api/accounts                      -> Account[] (also in StateResponse.accounts and WS 'accounts' events)
+// ---- Wave B ----
+// POST /api/agents/:id/answer             body { questionId: string; text: string } -> 200; removes the question and
+//      delivers to the agent as a prompt (queued if busy): "[Answer to «<question, 160 chars>»] <text>"
+// POST /api/agents/:id/move               body { accountId: string } -> 201 AgentSummary of a NEW agent on that account
+//      (same kind), seeded with the original task + the last 40 feed items as context; the old card is stopped+archived
+// POST /api/agents/:id/archive            body { archived: boolean } -> 200 (tower agents)
+// POST /api/agents/:id/prompt             body may also carry attachments?: string[] (upload ids): files are copied to
+//      <cwd>/attachments/<name> and the prompt gets a line "Attached: attachments/<name>" per file
+// POST /api/uploads?name=<filename>       raw body (≤ 20 MB, any content-type) -> 201 { id, name, size }
+// tmux cards (source 'tmux', only when interactive): POST /api/agents/:id/send { text } (bracketed paste + Enter),
+//      POST /api/agents/:id/key { key } key ∈ Escape|Enter|Up|Down|Left|Right|Tab|C-c, GET /api/agents/:id/screen
+//      -> { text: string; at: number } (capture-pane, last 120 lines, ANSI stripped); 409 when not interactive
+// POST /api/notes { title, body } -> 201 Note · PATCH /api/notes/:id { title?, body?, archived? } -> Note
+// DELETE /api/notes/:id -> 200 · POST /api/notes/:id/start { kind, accountId? } -> 201 AgentSummary (task = title + body)
+// Agent CLI `tower ask [--recommendation "…"] "question"`: talks to the unix socket ~/.local/state/tower/agent.sock
+//      (mode 600, no token); identifies the agent by env TOWER_AGENT_ID (set by the server for every agent it spawns).
 // POST /api/agents/:id/permission         body { requestId: string; optionId: string } -> 200 (404 if no such pending request)
 //      ACP reply is nested: { outcome: { outcome: 'selected', optionId } }
 // POST /api/agents/:id/stop               -> 200: (a) answer any pending permission { outcome: { outcome: 'cancelled' } },
@@ -178,4 +217,5 @@ export type ServerEvent =
   | { type: 'feed'; agentId: string; item: FeedItem } // upsert by item.id within agentId
   | { type: 'capacity'; capacity: Capacity[] }
   | { type: 'accounts'; accounts: Account[] }
-  | { type: 'agent_removed'; agentId: string };
+  | { type: 'agent_removed'; agentId: string }
+  | { type: 'notes'; notes: Note[] };

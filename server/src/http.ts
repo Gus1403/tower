@@ -7,6 +7,7 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
 import type { AgentManager } from './agents.js';
+import { handleExtra } from './extra.js';
 import type { Account, LaunchRequest, ServerEvent } from '../../shared/contract.js';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -125,6 +126,7 @@ export function createServer(manager: AgentManager, token: string) {
 
       if (req.method === 'GET' && p === '/api/state') return json(res, 200, state());
       if (req.method === 'GET' && p === '/api/accounts') return json(res, 200, manager.listAccounts());
+      if (await handleExtra({ req, res, path: p, url, manager, send, json, readBody })) return;
 
       const feedMatch = p.match(/^\/api\/agents\/([^/]+)\/feed$/);
       if (req.method === 'GET' && feedMatch) {
