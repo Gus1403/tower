@@ -37,14 +37,54 @@ function Thought({ text }: { text: string }) {
   );
 }
 
+// Presentation only: pull a short, human detail (command / path / pattern) out of a raw tool detail.
+function shortDetail(detail?: string): { cmd?: string; text?: string } {
+  if (!detail) return {};
+  const t = detail.trim();
+  if (t.startsWith('{') || t.startsWith('[')) {
+    try {
+      const j = JSON.parse(t) as Record<string, unknown>;
+      const pick = (...ks: string[]) => {
+        for (const k of ks) {
+          const v = j && typeof j === 'object' ? (j as Record<string, unknown>)[k] : undefined;
+          if (typeof v === 'string' && v) return v;
+          if (Array.isArray(v) && v.every((x) => typeof x === 'string')) return v.join(' ');
+        }
+        return undefined;
+      };
+      const cmd = pick('command', 'cmd');
+      if (cmd) return { cmd };
+      const text = pick('file_path', 'path', 'filePath', 'pattern', 'query', 'url', 'description');
+      return text ? { text } : {};
+    } catch {
+      return {};
+    }
+  }
+  return { text: t.split('\n')[0] };
+}
+
 function ToolRow({ item }: { item: Extract<FeedItem, { type: 'tool_call' }> }) {
   const [open, setOpen] = useState(false);
+  const d = shortDetail(item.detail);
+  const sameAsTitle = d.cmd && item.title.includes(d.cmd);
+  if (d.text) {
+    // drop a detail that only repeats the title (e.g. the same path), keep what's new ("+6 −1")
+    const first = d.text.split(/\s+/)[0];
+    if (item.title.includes(d.text)) d.text = undefined;
+    else if (first && item.title.includes(first)) d.text = d.text.slice(first.length).trim() || undefined;
+  }
   return (
     <div className={`f-toolwrap ${open ? 'open' : ''}`}>
       <button className={`f-tool f-tool-${item.status}`} title={item.detail} onClick={() => setOpen((o) => !o)} aria-expanded={open}>
         <ToolStatusIcon status={item.status} />
-        <span className="f-tool-title">{item.title}</span>
-        {item.detail && <span className="f-tool-detail">{item.detail}</span>}
+        {d.cmd && !sameAsTitle ? (
+          <span className="f-tool-title">
+            Ran <code className="f-tool-cmd">{d.cmd}</code>
+          </span>
+        ) : (
+          <span className="f-tool-title">{item.title}</span>
+        )}
+        {d.text && d.text !== item.title && <span className="f-tool-detail">{d.text}</span>}
         {item.toolKind && <span className="f-tool-kind">{item.toolKind}</span>}
       </button>
       {open && (
@@ -84,9 +124,36 @@ const FeedRow = memo(function FeedRow({ item }: { item: FeedItem }) {
         </div>
       );
     case 'status':
-      return <div className="f-status">{item.text}</div>;
+      return <div className="f-status">{humanStatus(item.text)}</div>;
   }
 });
+
+// Presentation only: lifecycle jargon -> plain words.
+function humanStatus(t: string): string {
+  const s = t.trim();
+  const low = s.toLowerCase();
+  if (/^turn ended:?\s*(end_turn)?$/.test(low) || low === 'end_turn') return 'Finished';
+  if (/^turn ended:\s*cancell?ed$/.test(low) || low === 'cancelled' || low === 'canceled') return 'Interrupted';
+  if (/^turn ended:\s*max_tokens$/.test(low)) return 'Stopped: output limit reached';
+  if (/^turn ended:\s*refusal$/.test(low)) return 'The agent declined';
+  if (/^turn ended:\s*max_turn_requests$/.test(low)) return 'Stopped: turn limit reached';
+  return s;
+}
+
+// Collapse consecutive identical (humanized) status lines.
+function dedupeStatus(items: FeedItem[]): FeedItem[] {
+  const out: FeedItem[] = [];
+  let last: string | null = null;
+  for (const it of items) {
+    if (it.type === 'status') {
+      const h = humanStatus(it.text);
+      if (h === last) continue;
+      last = h;
+    } else last = null;
+    out.push(it);
+  }
+  return out;
+}
 
 function Feed({ id }: { id: string }) {
   const items = useStore((s) => s.feeds[id] ?? EMPTY);
@@ -121,7 +188,7 @@ function Feed({ id }: { id: string }) {
           <div className="sk w40" />
         </div>
       ) : (
-        items.map((it) => <FeedRow key={it.id} item={it} />)
+        dedupeStatus(items).map((it) => <FeedRow key={it.id} item={it} />)
       )}
     </div>
   );
@@ -137,7 +204,7 @@ function ControlBar({ a }: { a: AgentSummary }) {
     <div className="ctrl">
       {live && modes.length > 0 && (
         <label className="ctrl-sel">
-          <span className="sr-only">Mode</span>
+          <span className="ctrl-lbl">Mode</span>
           <select
             aria-label="Mode"
             className="sel-mode"
@@ -158,9 +225,9 @@ function ControlBar({ a }: { a: AgentSummary }) {
         </label>
       )}
       {live &&
-        opts.map((o) => (
+        opts.filter((o) => !(modes.length > 0 && (o.id === 'mode' || (o.options.length > 0 && o.options.every((v) => modes.some((m) => m.id === v.value)))))).map((o) => (
           <label className="ctrl-sel" key={o.id}>
-            <span className="sr-only">{o.name}</span>
+            <span className="ctrl-lbl">{o.name}</span>
             <select
               aria-label={o.name}
               className={`sel-config sel-${o.id}`}
@@ -328,15 +395,15 @@ export function Panel() {
   }, []);
 
   if (!id || !a) return null;
-  const canStop = a.source === 'tower' && a.status !== 'stopped' && a.status !== 'error';
+  const canStop = a.source === 'tower' && a.status !== 'stopped' && a.status !== 'error' && a.status !== 'done';
   const done = a.plan?.filter((p) => p.status === 'completed').length ?? 0;
   return (
     <aside className="panel" aria-label={`Agent ${a.name}`}>
       <div className="panel-head">
         <div className="panel-row">
-          <KindBadge kind={a.kind} />
           <span className="panel-name">{a.name}</span>
           <StatusPill status={a.status} />
+          <KindBadge kind={a.kind} />
           <span className="spacer" />
           {a.source === 'tower' && a.status === 'working' && (
             <button

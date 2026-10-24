@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, type ReactNode } from 'react';
+import { memo, useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import type { AgentKind, AgentStatus, AgentSummary, Capacity, PermissionOption, PermissionRequest } from '../../shared/contract';
 import { api } from './api';
 import { getState, openAgent, setLaunchOpen, toast, upsertAgent, useNow, useStore } from './store';
@@ -29,7 +29,7 @@ export function ago(ms: number): string {
 export function TowerGlyph({ size = 18 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden="true">
-      <rect width="24" height="24" rx="6" fill="#111" />
+      <rect width="24" height="24" rx="6" fill="#2563eb" />
       <path d="M8.5 19h7l-1.2-8.5h-4.6z M10 10.5V7.5h4v3 M12 7.5V4.5" stroke="#fff" strokeWidth="1.6" fill="none" strokeLinejoin="round" strokeLinecap="round" />
     </svg>
   );
@@ -92,6 +92,60 @@ export function PermissionButtons({ agent, req }: { agent: AgentSummary; req: Pe
   );
 }
 
+// ---------- theme ----------
+type Theme = 'system' | 'light' | 'dark';
+const THEME_KEY = 'tower.theme';
+function readTheme(): Theme {
+  try {
+    const v = localStorage.getItem(THEME_KEY);
+    return v === 'light' || v === 'dark' ? v : 'system';
+  } catch {
+    return 'system';
+  }
+}
+function applyTheme(t: Theme) {
+  if (t === 'system') document.documentElement.removeAttribute('data-theme');
+  else document.documentElement.setAttribute('data-theme', t);
+}
+if (typeof document !== 'undefined') applyTheme(readTheme());
+
+export function ThemeToggle() {
+  const [theme, setTheme] = useState<Theme>(readTheme);
+  const next: Theme = theme === 'system' ? 'light' : theme === 'light' ? 'dark' : 'system';
+  const label = theme === 'system' ? 'Theme: system' : theme === 'light' ? 'Theme: light' : 'Theme: dark';
+  return (
+    <button
+      className="icon-btn theme-btn"
+      title={`${label} (click for ${next})`}
+      aria-label={label}
+      onClick={() => {
+        try {
+          if (next === 'system') localStorage.removeItem(THEME_KEY);
+          else localStorage.setItem(THEME_KEY, next);
+        } catch {}
+        applyTheme(next);
+        setTheme(next);
+      }}
+    >
+      <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round">
+        {theme === 'light' ? (
+          <>
+            <circle cx="8" cy="8" r="3" />
+            <path d="M8 1.5v1.5M8 13v1.5M1.5 8H3M13 8h1.5M3.4 3.4l1 1M11.6 11.6l1 1M3.4 12.6l1-1M11.6 4.4l1-1" />
+          </>
+        ) : theme === 'dark' ? (
+          <path d="M13.5 9.5A5.5 5.5 0 0 1 6.5 2.5a5.5 5.5 0 1 0 7 7z" strokeLinejoin="round" />
+        ) : (
+          <>
+            <rect x="2" y="3" width="12" height="8.5" rx="1.5" />
+            <path d="M6 14h4M8 11.5V14" />
+          </>
+        )}
+      </svg>
+    </button>
+  );
+}
+
 // ---------- top bar ----------
 function CapacityChip({ c }: { c: Capacity }) {
   const accounts = useAccounts().filter((a) => a.kind === c.kind);
@@ -118,7 +172,7 @@ function CapacityChip({ c }: { c: Capacity }) {
   );
 }
 
-export function TopBar({ search }: { search?: ReactNode } = {}) {
+export function TopBar({ search, tabs }: { search?: ReactNode; tabs?: ReactNode } = {}) {
   const agents = useStore((s) => s.agents);
   const capacity = useStore((s) => s.capacity);
   const host = useStore((s) => s.host);
@@ -138,6 +192,7 @@ export function TopBar({ search }: { search?: ReactNode } = {}) {
         <span className="wordmark">Tower</span>
         {host && <span className="host">{host}</span>}
       </div>
+      <div className="topbar-tabs">{tabs}</div>
       <div className="counts">
         <span><b className="c-working">{counts.working}</b> working</span>
         <span className="sep">·</span>
@@ -156,6 +211,7 @@ export function TopBar({ search }: { search?: ReactNode } = {}) {
         </button>
       </div>
       <AlertControls />
+      <ThemeToggle />
       <button className="btn btn-primary new-btn" onClick={() => setLaunchOpen(true)}>
         <span className="plus">+</span>
         <span className="new-label">New agent</span>
@@ -194,7 +250,32 @@ export function Inbox() {
     return () => window.removeEventListener('keydown', onKey);
   }, [onKey]);
 
+  const needs = useMemo(
+    () =>
+      Object.values(agents)
+        .filter((a) => a.source !== 'tmux' && (a.pendingPermission || a.status === 'needs_you' || a.status === 'stuck' || a.status === 'error' || a.status === 'done'))
+        .sort((a, b) => rank(a) - rank(b) || b.lastActivityAt - a.lastActivityAt),
+    [agents],
+  );
+
   return (
+    <>
+    {needs.length > 0 && (
+      <nav className="needs-strip" aria-label="Needs you summary">
+        <span className="needs-label">Needs you ({needs.length})</span>
+        {needs.map((a) => {
+          const tone = a.pendingPermission || a.status === 'needs_you' ? 'am' : a.status === 'done' ? 'gr' : 'rd';
+          const what = a.pendingPermission ? 'asks permission' : a.status === 'needs_you' ? 'asks you' : a.status === 'done' ? 'finished' : a.status === 'stuck' ? 'stuck' : 'error';
+          return (
+            <button key={a.id} className={`needs-chip needs-${tone}`} onClick={() => openAgent(a.id)} title={a.task}>
+              <i />
+              <span className="needs-name">{a.name}</span>
+              <span className="needs-what">· {what}</span>
+            </button>
+          );
+        })}
+      </nav>
+    )}
     <section className="inbox" hidden={pending.length === 0} aria-label="Needs you">
       <div className="inbox-head">
         <span className="inbox-title">Needs you</span>
@@ -217,30 +298,64 @@ export function Inbox() {
         </div>
       ))}
     </section>
+    </>
   );
+}
+
+function rank(a: AgentSummary): number {
+  if (a.pendingPermission || a.status === 'needs_you') return 0;
+  if (a.status === 'stuck' || a.status === 'error') return 1;
+  return 2;
+}
+
+function statusLine(a: AgentSummary): string {
+  const msg = a.lastMessage?.trim();
+  switch (a.status) {
+    case 'needs_you':
+      return a.pendingPermission ? `Waiting on you · ${a.pendingPermission.title}` : msg ? `Waiting on you · ${msg}` : 'Waiting on you';
+    case 'working':
+      return msg ? `Working · ${msg}` : 'Working';
+    case 'starting':
+      return 'Starting…';
+    case 'done':
+      return msg ? `Done · ${msg}` : 'Done';
+    case 'stuck':
+      return msg ? `Stuck · ${msg}` : 'Stuck · no progress';
+    case 'error':
+      return msg ? `Error · ${msg}` : 'Error';
+    case 'stopped':
+      return msg ? `Stopped · ${msg}` : 'Stopped';
+    default:
+      return msg ?? STATUS_LABEL[a.status];
+  }
 }
 
 // ---------- card ----------
 export const AgentCard = memo(function AgentCard({ a, selected }: { a: AgentSummary; selected: boolean }) {
   const now = useNow();
-  const account = useAccounts().find((x) => x.id === a.accountId);
+  const accounts = useAccounts();
+  const account = accounts.find((x) => x.id === a.accountId);
+  const movedAcctId = useStore((s) => (a.movedFrom ? (a.movedFrom.accountId ?? s.agents[a.movedFrom.agentId]?.accountId) : undefined));
+  const movedLabel = a.movedFrom ? (accounts.find((x) => x.id === movedAcctId)?.label ?? movedAcctId ?? 'another account') : undefined;
   const queued = a.queued?.length ?? 0;
   const ctx = a.usage && a.usage.size > 0 ? Math.min(100, (a.usage.used / a.usage.size) * 100) : undefined;
   const done = a.plan ? a.plan.filter((p) => p.status === 'completed').length : 0;
   return (
     <button className={`card card-${a.status} ${selected ? 'selected' : ''}`} onClick={() => openAgent(a.id)}>
       <div className="card-top">
-        <KindBadge kind={a.kind} />
-        <span className="card-name">{a.name}</span>
         <span className={`dot dot-${a.status}`} title={STATUS_LABEL[a.status]} />
+        <span className="card-name">{a.name}</span>
       </div>
       <div className="card-task">{a.task}</div>
-      {a.lastMessage && <div className="card-msg">{a.lastMessage}</div>}
+      <div className={`card-msg card-st-${a.status}`}>{statusLine(a)}</div>
       {a.status === 'error' && a.error && <div className="card-err">{a.error}</div>}
+      {movedLabel && (
+        <span className="card-moved" title={`Moved from ${movedLabel}`}>
+          Moved from {movedLabel}
+        </span>
+      )}
       <div className="card-meta">
-        <span title="Elapsed" className="elapsed">{ago(now - a.createdAt)}</span>
-        <span className="sep elapsed">·</span>
-        <span title="Last activity">active {ago(now - a.lastActivityAt)} ago</span>
+        <span title={`Running for ${ago(now - a.createdAt)}`}>{STATUS_LABEL[a.status]} · {ago(now - a.lastActivityAt)} ago</span>
         {a.accountId && (
           <>
             <span className="sep">·</span>
@@ -262,6 +377,7 @@ export const AgentCard = memo(function AgentCard({ a, selected }: { a: AgentSumm
             {done}/{a.plan.length}
           </span>
         )}
+        <span className="card-tag" title={KIND_LABEL[a.kind]}>{a.model ?? KIND_SHORT[a.kind]}</span>
       </div>
       {ctx !== undefined && (
         <span className="card-ctx" title={`Context ${Math.round(ctx)}% (${a.usage!.used.toLocaleString()} / ${a.usage!.size.toLocaleString()} tokens)`}>
