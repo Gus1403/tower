@@ -1,4 +1,4 @@
-/* Design tokens (Forja-like language). Light by default; dark via system or html[data-theme]. */
+/* Design tokens. Light by default; dark via system or html[data-theme]. */
 :root {
   color-scheme: light;
   --bg: #fff;
