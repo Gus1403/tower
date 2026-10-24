@@ -28,6 +28,19 @@ import type { AccountsPort, PersistedAgent, StorePort } from './ports.js';
 import { deleteUpload, getUpload } from './uploads.js';
 import { tmuxAllowed } from './tmux-control.js';
 
+// The human part of a tool's raw input: the command or path when present, else a short JSON preview.
+function inputPreview(raw: unknown): string | undefined {
+  if (raw && typeof raw === 'object') {
+    const r = raw as Record<string, unknown>;
+    for (const k of ['command', 'cmd', 'file_path', 'path', 'url', 'query', 'pattern']) {
+      const v = r[k];
+      if (typeof v === 'string' && v.trim()) return v.length > 400 ? v.slice(0, 400) : v;
+      if (Array.isArray(v) && v.every((x) => typeof x === 'string')) return v.join(' ').slice(0, 400);
+    }
+  }
+  return preview(raw);
+}
+
 export function towerDataDir(): string {
   return process.env.TOWER_DATA_DIR || path.join(os.homedir(), '.local', 'state', 'tower');
 }
@@ -801,7 +814,7 @@ export class AgentManager extends EventEmitter {
         title: t.title,
         kind: t.kind,
         status: t.status ?? 'pending',
-        detail: preview(t.rawInput) ?? preview(t.content),
+        detail: inputPreview(t.rawInput) ?? preview(t.content),
       };
       const out = outputText(t.rawOutput, t.content);
       if (out) st.output = out;
@@ -818,7 +831,8 @@ export class AgentManager extends EventEmitter {
       if (t.title != null) merged.title = t.title;
       if (t.kind != null) merged.kind = t.kind;
       if (t.status != null) merged.status = t.status;
-      const d = preview(t.rawInput) ?? preview(t.content) ?? preview(t.rawOutput);
+      // detail previews the INPUT (command/path); results go to output, never over the input preview
+      const d = inputPreview(t.rawInput) ?? (prev.detail ? undefined : preview(t.content) ?? preview(t.rawOutput));
       if (d) merged.detail = d;
       const out = outputText(t.rawOutput, t.content);
       if (out) merged.output = out;
