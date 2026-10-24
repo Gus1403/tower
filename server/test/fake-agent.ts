@@ -18,8 +18,9 @@ const agent: acp.Agent = {
   async initialize() {
     return { protocolVersion: acp.PROTOCOL_VERSION, agentCapabilities: { loadSession: true } };
   },
-  async newSession() {
+  async newSession(params) {
     const sessionId = `sess-${Math.random().toString(36).slice(2)}`;
+    void params;
     sessions.set(sessionId, { cancelled: false });
     return {
       sessionId,
@@ -104,6 +105,25 @@ const agent: acp.Agent = {
     if (mode === 'slow') {
       sess.cancelled = false;
       const text = params.prompt.map((b) => (b.type === 'text' ? b.text : '')).join('');
+      await upd({
+        sessionUpdate: 'available_commands_update',
+        availableCommands: [{ name: 'review', description: 'Review the diff', input: null }],
+      } as acp.SessionUpdate);
+      if (text === 'fail-limit') {
+        console.error('fake-agent: You hit your usage limit (429)');
+        await sleep(300);
+        throw new Error('usage limit reached');
+      }
+      if (text.startsWith('read:')) {
+        let out: string;
+        try {
+          out = 'read-ok:' + (await conn.readTextFile({ sessionId, path: text.slice(5) })).content;
+        } catch (err) {
+          out = 'read-err:' + String((err as { message?: string })?.message ?? err);
+        }
+        await upd({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: out } });
+        return { stopReason: 'end_turn' };
+      }
       await upd({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `echo:${text}` } });
       await upd({ sessionUpdate: 'usage_update', used: 1234, size: 200000 });
       await upd({ sessionUpdate: 'tool_call', toolCallId: `t-${text}`, title: 'Run ls', kind: 'execute', status: 'in_progress' });

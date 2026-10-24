@@ -1,7 +1,8 @@
 import os from 'node:os';
 import path from 'node:path';
-import { AgentManager } from './agents.js';
+import { AgentManager, towerDataDir } from './agents.js';
 import { createServer } from './http.js';
+import { startAgentSocket } from './agent-socket.js';
 import { createAccounts } from './accounts.js';
 import { createStore } from './store.js';
 
@@ -23,8 +24,15 @@ process.on('uncaughtException', (err) => console.error('[tower] uncaughtExceptio
 
 const accounts = createAccounts();
 const store = createStore();
-const manager = new AgentManager({ workDir, stuckMs, accounts, store });
+const manager = new AgentManager({
+  workDir,
+  stuckMs,
+  accounts,
+  store,
+  notesFile: path.join(towerDataDir(), 'notes.json'),
+});
 const server = createServer(manager, token);
+const closeAgentSocket = startAgentSocket(manager);
 accounts.start(
   (list) => server.broadcastAccounts(list),
   (accountId) => manager.countRunning(accountId),
@@ -37,6 +45,7 @@ server.listen(port, host, () => {
 const shutdown = async () => {
   console.log('[tower] shutting down, stopping agents');
   manager.shutdown();
+  closeAgentSocket();
   accounts.stop();
   manager.saveNow();
   await manager.stopAll();

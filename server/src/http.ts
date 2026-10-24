@@ -54,6 +54,7 @@ export function createServer(manager: AgentManager, token: string) {
   manager.on('feed', (agentId, item) => send({ type: 'feed', agentId, item }));
   manager.on('capacity', (capacity) => send({ type: 'capacity', capacity }));
   manager.on('agent_removed', (agentId) => send({ type: 'agent_removed', agentId }));
+  manager.on('notes', (notes) => send({ type: 'notes', notes }));
   const broadcastAccounts = (accounts: Account[]) => send({ type: 'accounts', accounts });
 
   const authed = (req: http.IncomingMessage): boolean => {
@@ -171,6 +172,59 @@ export function createServer(manager: AgentManager, token: string) {
         return json(res, 201, agent);
       }
 
+      // ---- Wave B: notes ----
+      if (req.method === 'POST' && p === '/api/notes') {
+        const body = (await readBody(req)) as { title?: unknown; body?: unknown };
+        if (typeof body.title !== 'string' || (body.body != null && typeof body.body !== 'string')) {
+          return json(res, 400, { error: 'title (string) is required; body must be a string' });
+        }
+        if (!body.title.trim() && !(typeof body.body === 'string' && body.body.trim())) {
+          return json(res, 400, { error: 'title or body is required' });
+        }
+        return json(res, 201, manager.createNote(body.title, (body.body as string | undefined) ?? ''));
+      }
+      const noteStart = p.match(/^\/api\/notes\/([^/]+)\/start$/);
+      if (req.method === 'POST' && noteStart) {
+        const body = (await readBody(req)) as { kind?: unknown; accountId?: unknown };
+        if (!['devin', 'claude', 'codex'].includes(body.kind as string)) {
+          return json(res, 400, { error: 'kind must be devin|claude|codex' });
+        }
+        if (body.accountId != null && typeof body.accountId !== 'string') {
+          return json(res, 400, { error: 'accountId must be a string' });
+        }
+        let agent;
+        try {
+          agent = await manager.startNote(
+            noteStart[1],
+            body.kind as LaunchRequest['kind'],
+            body.accountId === 'auto' ? undefined : (body.accountId as string | undefined),
+          );
+        } catch (err) {
+          if (err instanceof Error && err.message === 'unknown account') return json(res, 400, { error: 'unknown account' });
+          throw err;
+        }
+        if (!agent) return json(res, 404, { error: 'no such note' });
+        return json(res, 201, agent);
+      }
+      const noteMatch = p.match(/^\/api\/notes\/([^/]+)$/);
+      if (noteMatch && req.method === 'PATCH') {
+        const body = (await readBody(req)) as { title?: unknown; body?: unknown; archived?: unknown };
+        if (
+          (body.title != null && typeof body.title !== 'string') ||
+          (body.body != null && typeof body.body !== 'string') ||
+          (body.archived != null && typeof body.archived !== 'boolean')
+        ) {
+          return json(res, 400, { error: 'title/body must be strings, archived a boolean' });
+        }
+        const n = manager.updateNote(noteMatch[1], body as { title?: string; body?: string; archived?: boolean });
+        if (!n) return json(res, 404, { error: 'no such note' });
+        return json(res, 200, n);
+      }
+      if (noteMatch && req.method === 'DELETE') {
+        if (!manager.deleteNote(noteMatch[1])) return json(res, 404, { error: 'no such note' });
+        return json(res, 200, { ok: true });
+      }
+
       const queueMatch = p.match(/^\/api\/agents\/([^/]+)\/queue\/(\d+)$/);
       if (req.method === 'DELETE' && queueMatch) {
         const r = manager.removeQueued(queueMatch[1], Number(queueMatch[2]));
@@ -186,7 +240,7 @@ export function createServer(manager: AgentManager, token: string) {
         return json(res, 200, { ok: true });
       }
 
-      const actMatch = p.match(/^\/api\/agents\/([^/]+)\/(prompt|permission|stop|interrupt|mode|config|resume)$/);
+      const actMatch = p.match(/^\/api\/agents\/([^/]+)\/(prompt|permission|stop|interrupt|mode|config|resume|answer|move|archive)$/);
       if (req.method === 'POST' && actMatch) {
         const [, id, action] = actMatch;
         if (manager.isObserved(id)) {
@@ -194,13 +248,48 @@ export function createServer(manager: AgentManager, token: string) {
         }
         if (!manager.getAgent(id)) return json(res, 404, { error: 'no such agent' });
         if (action === 'prompt') {
-          const body = (await readBody(req)) as { text?: unknown; interrupt?: unknown };
+          const body = (await readBody(req)) as { text?: unknown; interrupt?: unknown; attachments?: unknown };
           if (typeof body.text !== 'string' || !body.text.trim()) {
             return json(res, 400, { error: 'text is required' });
           }
-          const r = manager.prompt(id, body.text, body.interrupt === true);
+          if (
+            body.attachments != null &&
+            (!Array.isArray(body.attachments) || !body.attachments.every((x) => typeof x === 'string'))
+          ) {
+            return json(res, 400, { error: 'attachments must be an array of upload ids' });
+          }
+          const r = manager.prompt(id, body.text, body.interrupt === true, body.attachments as string[] | undefined);
           if (r.result === 'conflict') return json(res, 409, { error: 'agent is not running' });
+          if (r.result === 'bad_attachment') return json(res, 400, { error: 'unknown attachment' });
           return json(res, 202, { queued: !!r.queued });
+        }
+        if (action === 'answer') {
+          const body = (await readBody(req)) as { questionId?: unknown; text?: unknown };
+          if (typeof body.questionId !== 'string' || typeof body.text !== 'string' || !body.text.trim()) {
+            return json(res, 400, { error: 'questionId and text are required' });
+          }
+          const r = manager.answer(id, body.questionId, body.text);
+          if (r === 'notfound') return json(res, 404, { error: 'no such question' });
+          if (r === 'conflict') return json(res, 409, { error: 'agent is not running' });
+          return json(res, 200, { ok: true });
+        }
+        if (action === 'move') {
+          const body = (await readBody(req)) as { accountId?: unknown };
+          if (typeof body.accountId !== 'string' || !body.accountId) {
+            return json(res, 400, { error: 'accountId is required' });
+          }
+          const r = await manager.move(id, body.accountId);
+          if (!r.ok) {
+            if (r.error === 'notfound') return json(res, 404, { error: 'no such agent' });
+            return json(res, 400, { error: 'unknown account' });
+          }
+          return json(res, 201, r.agent);
+        }
+        if (action === 'archive') {
+          const body = (await readBody(req)) as { archived?: unknown };
+          if (typeof body.archived !== 'boolean') return json(res, 400, { error: 'archived must be a boolean' });
+          manager.setArchived(id, body.archived);
+          return json(res, 200, { ok: true });
         }
         if (action === 'interrupt') {
           const r = manager.interrupt(id);

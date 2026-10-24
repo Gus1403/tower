@@ -1,7 +1,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdtempSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -15,6 +15,8 @@ const PORT = 14747 + Math.floor(Math.random() * 500);
 const BASE = `http://127.0.0.1:${PORT}`;
 const TOKEN = 'test-token-abc';
 const AUTH = { authorization: `Bearer ${TOKEN}` };
+const DATA_DIR = mkdtempSync(path.join(tmpdir(), 'tower-data-'));
+process.env.TOWER_DATA_DIR = DATA_DIR;
 
 let serverProc: ChildProcess;
 const events: ServerEvent[] = [];
@@ -65,6 +67,7 @@ before(async () => {
         TOWER_HOST: '127.0.0.1',
         TOWER_WORK_DIR: workDir,
         TOWER_STUCK_MS: '2000',
+        TOWER_DATA_DIR: mkdtempSync(path.join(tmpdir(), 'tower-data-spawned-')),
         TOWER_CMD_DEVIN: `${TSX} ${FAKE} normal`,
         TOWER_CMD_CLAUDE: `${TSX} ${FAKE} silent`,
         TOWER_CMD_CODEX: `${TSX} ${FAKE} crash`,
@@ -334,14 +337,15 @@ const fakeAccounts: AccountsPort = {
   stop: () => {},
 };
 
-async function inProc(store: StorePort) {
+async function inProc(store: StorePort, opts: { accounts?: AccountsPort; notesFile?: string } = {}) {
   process.env.TOWER_TMUX = '0';
   process.env.TOWER_CMD_DEVIN = `${TSX} ${FAKE} slow`;
   const manager = new AgentManager({
     workDir: mkdtempSync(path.join(tmpdir(), 'tower-w-')),
     stuckMs: 60000,
-    accounts: fakeAccounts,
+    accounts: opts.accounts ?? fakeAccounts,
     store,
+    notesFile: opts.notesFile,
   });
   const server = createServer(manager, TOKEN);
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
@@ -518,5 +522,226 @@ test('wave A: persistence -> stopped+resumable -> /resume loadSession -> done; D
     assert.ok(!store.data.some((p) => p.summary.id === id));
   } finally {
     await h2.close();
+  }
+});
+
+// ---- Wave B ----
+const twoAccounts: AccountsPort = {
+  list: () => [],
+  envFor: (kind, id) => {
+    if (kind !== 'devin' || (id && id !== 'acc-1' && id !== 'acc-2')) throw new Error('unknown account');
+    return { accountId: id ?? 'acc-1', env: {} };
+  },
+  start: () => {},
+  stop: () => {},
+};
+
+const feedEvents = (h: { evs: ServerEvent[] }, id: string) =>
+  h.evs.filter((e) => e.type === 'feed' && e.agentId === id).map((e) => (e as { item: FeedItem }).item);
+
+test('wave B: ask -> needs_you with question -> answer delivered as a prompt; commands captured', async () => {
+  const h = await inProc(memStore());
+  try {
+    const a = (await (await h.post('/api/agents', { kind: 'devin', task: 'first' })).json()) as AgentSummary;
+    await untilStatus(h, a.id, 'done');
+    assert.deepEqual(h.last(a.id)?.commands, [{ name: 'review', description: 'Review the diff' }]);
+    assert.deepEqual(h.manager.ask('nope', 'x'), { ok: false, error: 'notfound' });
+    const r = h.manager.ask(a.id, 'Which database should I use?', 'sqlite');
+    assert.equal(r.ok, true);
+    const s = await untilStatus(h, a.id, 'needs_you');
+    assert.equal(s!.questions?.length, 1);
+    assert.equal(s!.questions![0].text, 'Which database should I use?');
+    assert.equal(s!.questions![0].recommendation, 'sqlite');
+    assert.ok(feedEvents(h, a.id).some((f) => f.type === 'status' && f.text === 'Asked: Which database should I use?'));
+    const qid = (r as { questionId: string }).questionId;
+    assert.equal((await h.post(`/api/agents/${a.id}/answer`, { questionId: 'nope', text: 'x' })).status, 404);
+    const ans = await h.post(`/api/agents/${a.id}/answer`, { questionId: qid, text: 'use postgres' });
+    assert.equal(ans.status, 200);
+    const want = '[Answer to «Which database should I use?»] use postgres';
+    await waitFor(() =>
+      h.manager.getFeed(a.id)!.some((x) => x.type === 'agent_message' && x.text === `echo:${want}`) ? true : undefined,
+    );
+    assert.ok(userTexts(await h.feed(a.id)).includes(want));
+    const done = await untilStatus(h, a.id, 'done');
+    assert.deepEqual(done!.questions, []);
+  } finally {
+    await h.close();
+  }
+});
+
+test('wave B: failed turn -> error + limitHit + queued discarded; move -> new agent on other account, old archived', async () => {
+  const h = await inProc(memStore(), { accounts: twoAccounts });
+  try {
+    const a = (await (await h.post('/api/agents', { kind: 'devin', task: 'first', accountId: 'acc-1' })).json()) as AgentSummary;
+    await untilStatus(h, a.id, 'done');
+    assert.equal((await h.post(`/api/agents/${a.id}/prompt`, { text: 'fail-limit' })).status, 202);
+    await untilStatus(h, a.id, 'working');
+    assert.deepEqual(await (await h.post(`/api/agents/${a.id}/prompt`, { text: 'q1' })).json(), { queued: true });
+    const err = await untilStatus(h, a.id, 'error');
+    assert.equal(err!.limitHit, true);
+    assert.deepEqual(err!.queued, []);
+    assert.ok(h.manager.getFeed(a.id)!.some((x) => x.type === 'status' && x.text === '1 queued prompt discarded'));
+
+    assert.equal((await h.post(`/api/agents/${a.id}/move`, { accountId: 'bogus' })).status, 400);
+    const mv = await h.post(`/api/agents/${a.id}/move`, { accountId: 'acc-2' });
+    assert.equal(mv.status, 201);
+    const b = (await mv.json()) as AgentSummary;
+    assert.notEqual(b.id, a.id);
+    assert.equal(b.kind, 'devin');
+    assert.equal(b.accountId, 'acc-2');
+    assert.equal(b.name, `${a.name} (moved)`);
+    assert.ok(b.task.startsWith('Continue this task on a fresh session. Original task: first\n\nConversation so far'));
+    assert.match(b.task, /User: first\nAgent: echo:first/);
+    assert.match(b.task, /User: fail-limit/);
+    await waitFor(() =>
+      userTexts(h.manager.getFeed(b.id)!)[0]?.startsWith('Continue this task') ? true : undefined,
+    );
+    const old = h.manager.getAgent(a.id)!;
+    assert.equal(old.archived, true);
+    assert.equal(old.status, 'error');
+
+    // archive route
+    assert.equal((await h.post(`/api/agents/${b.id}/archive`, { archived: 'x' })).status, 400);
+    assert.equal((await h.post(`/api/agents/${b.id}/archive`, { archived: true })).status, 200);
+    await waitFor(() => (h.last(b.id)?.archived === true ? true : undefined));
+    assert.equal((await h.post(`/api/agents/${b.id}/archive`, { archived: false })).status, 200);
+    await waitFor(() => (h.last(b.id)?.archived === false ? true : undefined));
+  } finally {
+    await h.close();
+  }
+});
+
+test('wave B: attachments uploaded, copied into cwd (deduped) and mentioned in the prompt', async () => {
+  const h = await inProc(memStore());
+  try {
+    const a = (await (await h.post('/api/agents', { kind: 'devin', task: 'first' })).json()) as AgentSummary;
+    await untilStatus(h, a.id, 'done');
+    const up = await fetch(`${h.base}/api/uploads?name=notes.txt`, {
+      method: 'POST',
+      headers: { ...AUTH, 'content-type': 'application/octet-stream' },
+      body: 'hello attachment',
+    });
+    assert.equal(up.status, 201);
+    const { id: upId } = (await up.json()) as { id: string };
+    assert.equal(
+      (await h.post(`/api/agents/${a.id}/prompt`, { text: 'look', attachments: ['deadbeef'] })).status,
+      400,
+    );
+    assert.equal((await h.post(`/api/agents/${a.id}/prompt`, { text: 'look', attachments: [upId] })).status, 202);
+    const cwd = h.manager.getAgent(a.id)!.cwd;
+    assert.equal(readFileSync(path.join(cwd, 'attachments', 'notes.txt'), 'utf8'), 'hello attachment');
+    // queued while busy: second copy is deduped and the stored queued text carries the line
+    await untilStatus(h, a.id, 'working');
+    await h.post(`/api/agents/${a.id}/prompt`, { text: 'again', attachments: [upId] });
+    assert.ok(existsSync(path.join(cwd, 'attachments', 'notes-1.txt')));
+    assert.deepEqual(h.last(a.id)?.queued, ['again\n\nAttached: attachments/notes-1.txt']);
+    await waitFor(() =>
+      userTexts(h.manager.getFeed(a.id)!).includes('again\n\nAttached: attachments/notes-1.txt') ? true : undefined,
+    );
+    assert.ok(userTexts(await h.feed(a.id)).includes('look\n\nAttached: attachments/notes.txt'));
+  } finally {
+    await h.close();
+  }
+});
+
+test('wave B: notes CRUD + start, persisted to notes.json (600), broadcast on WS', async () => {
+  const notesFile = path.join(mkdtempSync(path.join(tmpdir(), 'tower-notes-')), 'notes.json');
+  const h = await inProc(memStore(), { notesFile });
+  try {
+    assert.equal((await h.post('/api/notes', { title: 5 })).status, 400);
+    const c = await h.post('/api/notes', { title: 'Fix login', body: 'the button is broken' });
+    assert.equal(c.status, 201);
+    const n = (await c.json()) as { id: string; title: string };
+    await waitFor(() => (h.evs.some((e) => e.type === 'notes' && e.notes.some((x) => x.id === n.id)) ? true : undefined));
+    const st = (await (await fetch(`${h.base}/api/state`, { headers: AUTH })).json()) as StateResponse;
+    assert.equal(st.notes.find((x) => x.id === n.id)?.body, 'the button is broken');
+    const pt = await fetch(`${h.base}/api/notes/${n.id}`, {
+      method: 'PATCH',
+      headers: { ...AUTH, 'content-type': 'application/json' },
+      body: JSON.stringify({ title: 'Fix login now' }),
+    });
+    assert.equal(pt.status, 200);
+    assert.equal(((await pt.json()) as { title: string }).title, 'Fix login now');
+    assert.equal(statSync(notesFile).mode & 0o777, 0o600);
+    assert.equal(JSON.parse(readFileSync(notesFile, 'utf8'))[0].title, 'Fix login now');
+
+    assert.equal((await h.post(`/api/notes/${n.id}/start`, { kind: 'nope' })).status, 400);
+    assert.equal((await h.post(`/api/notes/missing/start`, { kind: 'devin' })).status, 404);
+    const sr = await h.post(`/api/notes/${n.id}/start`, { kind: 'devin' });
+    assert.equal(sr.status, 201);
+    const ag = (await sr.json()) as AgentSummary;
+    assert.equal(ag.task, 'Fix login now\n\nthe button is broken');
+    await waitFor(() => (h.manager.listNotes().find((x) => x.id === n.id)?.archived ? true : undefined));
+    await untilStatus(h, ag.id, 'done');
+
+    const del = await fetch(`${h.base}/api/notes/${n.id}`, { method: 'DELETE', headers: AUTH });
+    assert.equal(del.status, 200);
+    assert.equal((await fetch(`${h.base}/api/notes/${n.id}`, { method: 'DELETE', headers: AUTH })).status, 404);
+    assert.deepEqual(JSON.parse(readFileSync(notesFile, 'utf8')), []);
+  } finally {
+    await h.close();
+  }
+  // reload from disk
+  const h2 = await inProc(memStore(), { notesFile });
+  try {
+    await h2.post('/api/notes', { title: 'kept' });
+  } finally {
+    await h2.close();
+  }
+  const h3 = await inProc(memStore(), { notesFile });
+  try {
+    const st = (await (await fetch(`${h3.base}/api/state`, { headers: AUTH })).json()) as StateResponse;
+    assert.deepEqual(st.notes.map((x) => x.title), ['kept']);
+  } finally {
+    await h3.close();
+  }
+});
+
+test('review fix A1: DELETE during starting stays removed, no events after agent_removed', async () => {
+  const store = memStore();
+  const h = await inProc(store);
+  try {
+    const a = (await (await h.post('/api/agents', { kind: 'devin', task: 'remove me early' })).json()) as AgentSummary;
+    const del = await fetch(`${h.base}/api/agents/${a.id}`, { method: 'DELETE', headers: AUTH });
+    assert.equal(del.status, 200);
+    await waitFor(() => (h.evs.some((e) => e.type === 'agent_removed' && e.agentId === a.id) ? true : undefined));
+    const at = h.evs.findIndex((e) => e.type === 'agent_removed' && e.agentId === a.id);
+    await new Promise((r) => setTimeout(r, 2500));
+    const after = h.evs
+      .slice(at + 1)
+      .filter((e) => (e.type === 'agent' && e.agent.id === a.id) || (e.type === 'feed' && e.agentId === a.id));
+    assert.deepEqual(after, []);
+    const st = (await (await fetch(`${h.base}/api/state`, { headers: AUTH })).json()) as StateResponse;
+    assert.ok(!st.agents.some((x) => x.id === a.id));
+    h.manager.saveNow();
+    assert.ok(!store.data.some((p) => p.summary.id === a.id));
+  } finally {
+    await h.close();
+  }
+});
+
+test('review fix A3: readTextFile through a symlink escaping the cwd is rejected', async () => {
+  const h = await inProc(memStore());
+  try {
+    const a = (await (await h.post('/api/agents', { kind: 'devin', task: 'first' })).json()) as AgentSummary;
+    await untilStatus(h, a.id, 'done');
+    const outside = mkdtempSync(path.join(tmpdir(), 'tower-outside-'));
+    writeFileSync(path.join(outside, 'secret.txt'), 'TOPSECRET');
+    symlinkSync(outside, path.join(a.cwd, 'link'));
+    mkdirSync(path.join(a.cwd, 'sub'), { recursive: true });
+    writeFileSync(path.join(a.cwd, 'sub', 'ok.txt'), 'fine');
+    await h.post(`/api/agents/${a.id}/prompt`, { text: `read:${path.join(a.cwd, 'link', 'secret.txt')}` });
+    await h.post(`/api/agents/${a.id}/prompt`, { text: `read:${path.join(a.cwd, 'sub', 'ok.txt')}` });
+    await waitFor(() =>
+      h.manager.getFeed(a.id)!.some((x) => x.type === 'agent_message' && x.text === 'read-ok:fine') ? true : undefined,
+    );
+    const msgs = h.manager
+      .getFeed(a.id)!
+      .filter((x) => x.type === 'agent_message')
+      .map((x) => (x as { text: string }).text);
+    assert.ok(!msgs.some((m) => m.includes('TOPSECRET')), 'secret leaked');
+    assert.ok(msgs.some((m) => m.startsWith('read-err:')), JSON.stringify(msgs));
+  } finally {
+    await h.close();
   }
 });

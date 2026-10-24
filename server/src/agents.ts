@@ -2,7 +2,8 @@ import { EventEmitter } from 'node:events';
 import { spawn, spawnSync, execFile, type ChildProcess } from 'node:child_process';
 import { Readable, Writable } from 'node:stream';
 import { randomBytes, createHash } from 'node:crypto';
-import { existsSync, mkdirSync, realpathSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -14,12 +15,21 @@ import type {
   AgentSummary,
   Capacity,
   FeedItem,
+  Note,
+  Question,
   StateResponse,
   LaunchRequest,
   PermissionRequest,
   PlanEntry,
 } from '../../shared/contract.js';
 import type { AccountsPort, PersistedAgent, StorePort } from './ports.js';
+import { getUpload } from './uploads.js';
+
+export function towerDataDir(): string {
+  return process.env.TOWER_DATA_DIR || path.join(os.homedir(), '.local', 'state', 'tower');
+}
+const LIMIT_RE = /usage limit|rate limit|429|quota|limit reached|hit your limit/i;
+const CANCEL_FORCE_MS = 5000;
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const TMUX_LIST = path.join(REPO_ROOT, 'probes', 'tmux-list.sh');
@@ -120,6 +130,7 @@ interface PendingPermission {
 
 interface TmuxEntry {
   summary: AgentSummary;
+  session: string;
 }
 
 interface ToolState {
@@ -148,6 +159,9 @@ interface AgentEntry {
   errored: boolean;
   replaying?: boolean;
   holdDrain?: boolean;
+  dead?: boolean; // removed from the manager: never emit again
+  gen: number; // process generation (bumped by resume)
+  turnId: number; // prompt turn id (bumped per turn and by a forced cancel)
 }
 
 export interface AgentManagerEvents {
@@ -155,6 +169,7 @@ export interface AgentManagerEvents {
   agent_removed: (agentId: string) => void;
   feed: (agentId: string, item: FeedItem) => void;
   capacity: (c: Capacity[]) => void;
+  notes: (n: Note[]) => void;
 }
 
 export declare interface AgentManager {
@@ -181,13 +196,23 @@ export class AgentManager extends EventEmitter {
   private accounts?: AccountsPort;
   private store?: StorePort;
   private saveTimer?: NodeJS.Timeout;
+  private notes: Note[] = [];
+  private notesFile?: string;
 
-  constructor(opts: { workDir: string; stuckMs: number; accounts?: AccountsPort; store?: StorePort }) {
+  constructor(opts: {
+    workDir: string;
+    stuckMs: number;
+    accounts?: AccountsPort;
+    store?: StorePort;
+    notesFile?: string;
+  }) {
     super();
     this.workDir = opts.workDir;
     this.stuckMs = opts.stuckMs;
     this.accounts = opts.accounts;
     this.store = opts.store;
+    this.notesFile = opts.notesFile;
+    this.loadNotes();
     mkdirSync(this.workDir, { recursive: true });
     if (this.store) {
       for (const p of this.store.load()) {
@@ -211,6 +236,8 @@ export class AgentManager extends EventEmitter {
           turnRunning: false,
           stopping: false,
           errored: false,
+          gen: 0,
+          turnId: 0,
         };
         this.agents.set(s.id, e);
       }
@@ -239,13 +266,33 @@ export class AgentManager extends EventEmitter {
     return `${prefix}-${++this.counter}-${randomBytes(3).toString('hex')}`;
   }
 
+  private live(e: AgentEntry): boolean {
+    return !e.dead && this.agents.get(e.summary.id) === e;
+  }
+
+  private emitAgent(e: AgentEntry) {
+    if (this.live(e)) this.emit('agent', e.summary);
+  }
+
+  // status while a turn is in flight: needs_you if a permission or a question is open
+  private busyStatus(e: AgentEntry): AgentStatus {
+    return e.pendingQueue.length || e.summary.questions?.length ? 'needs_you' : 'working';
+  }
+
+  private noteLimit(e: AgentEntry, text: string) {
+    const tail = e.stderr.slice(-20).join('\n');
+    if (LIMIT_RE.test(text) || LIMIT_RE.test(tail)) e.summary.limitHit = true;
+  }
+
   private setStatus(e: AgentEntry, s: AgentStatus, extra?: Partial<AgentSummary>) {
+    if (!this.live(e)) return;
     e.summary = { ...e.summary, status: s, ...extra };
     this.emit('agent', e.summary);
     this.broadcastCapacity();
   }
 
   private pushFeed(e: AgentEntry, item: FeedItem) {
+    if (!this.live(e)) return;
     const idx = e.feed.findIndex((f) => f.id === item.id);
     if (idx >= 0) e.feed[idx] = item;
     else {
@@ -256,6 +303,7 @@ export class AgentManager extends EventEmitter {
   }
 
   private touch(e: AgentEntry) {
+    if (!this.live(e)) return;
     e.summary.lastActivityAt = Date.now();
     if (e.summary.status === 'stuck') {
       e.summary.status = 'working';
@@ -290,7 +338,7 @@ export class AgentManager extends EventEmitter {
     }
     const id = newId();
     const cwd = path.join(this.workDir, id);
-    mkdirSync(cwd, { recursive: true });
+    mkdirSync(cwd, { recursive: true, mode: 0o700 });
     const name = req.name?.trim() || req.task.trim().split(/\s+/).slice(0, 4).join(' ');
     const e: AgentEntry = {
       summary: {
@@ -318,21 +366,24 @@ export class AgentManager extends EventEmitter {
       turnPromise: undefined,
       stopping: false,
       errored: false,
+      gen: 0,
+      turnId: 0,
     };
     this.agents.set(id, e);
-    this.emit('agent', e.summary);
+    this.emitAgent(e);
     this.broadcastCapacity();
-    this.startProcess(e, req, extraEnv).catch((err) => this.startFailed(e, err));
+    this.startProcess(e, req, extraEnv, undefined, e.gen).catch((err) => this.startFailed(e, err, e.gen));
     return e.summary;
   }
 
-  private startFailed(e: AgentEntry, err: unknown) {
+  private startFailed(e: AgentEntry, err: unknown, gen: number) {
     {
-      if (e.stopping) return;
+      if (e.stopping || e.dead || e.gen !== gen) return;
       e.errored = true;
       const tail = e.stderr.slice(-20).join('\n');
       const m = err instanceof Error ? err.message : String(err);
       const msg = oneLine(`${m}${tail ? `: ${tail}` : ''}`, 400);
+      this.noteLimit(e, m);
       this.setStatus(e, 'error', { error: msg });
     }
   }
@@ -344,24 +395,31 @@ export class AgentManager extends EventEmitter {
     let extraEnv: Record<string, string> = {};
     if (this.accounts) {
       try {
-        extraEnv = this.accounts.envFor(e.summary.kind, e.summary.accountId).env ?? {};
+        const le = this.accounts.envFor(e.summary.kind, e.summary.accountId);
+        if (e.summary.accountId && le.accountId !== e.summary.accountId) return 'unknown_account';
+        extraEnv = le.env ?? {};
       } catch {
         return 'unknown_account';
       }
     }
-    mkdirSync(e.cwd, { recursive: true });
+    mkdirSync(e.cwd, { recursive: true, mode: 0o700 });
+    e.gen += 1;
+    e.turnId += 1;
+    e.turnRunning = false;
     e.stopping = false;
     e.errored = false;
     e.stderr = [];
     e.proc = undefined;
     e.conn = undefined;
     this.setStatus(e, 'starting', { error: undefined, stopReason: undefined });
+    const gen = e.gen;
     this.startProcess(
       e,
       { kind: e.summary.kind, task: e.summary.task, model: e.summary.model, accountId: e.summary.accountId },
       extraEnv,
       e.sessionId,
-    ).catch((err) => this.startFailed(e, err));
+      e.gen,
+    ).catch((err) => this.startFailed(e, err, gen));
     return 'ok';
   }
 
@@ -369,7 +427,8 @@ export class AgentManager extends EventEmitter {
     e: AgentEntry,
     req: LaunchRequest,
     extraEnv: Record<string, string>,
-    resumeSessionId?: string,
+    resumeSessionId: string | undefined,
+    gen: number,
   ): Promise<void> {
     const cmd = this.commandFor(req.kind, req.model);
     console.log(`[tower] spawn agent ${e.summary.id} (${req.kind}): ${cmd.join(' ')}`);
@@ -377,6 +436,8 @@ export class AgentManager extends EventEmitter {
       Object.entries(process.env).filter(([k]) => !k.startsWith('TOWER_')),
     ) as NodeJS.ProcessEnv;
     for (const [k, v] of Object.entries(extraEnv)) if (!k.startsWith('TOWER_')) childEnv[k] = v;
+    childEnv.TOWER_AGENT_ID = e.summary.id;
+    childEnv.TOWER_SOCKET = path.join(towerDataDir(), 'agent.sock');
     let proc: ChildProcess;
     try {
       proc = spawn(cmd[0], cmd.slice(1), {
@@ -388,10 +449,16 @@ export class AgentManager extends EventEmitter {
       throw new Error(`spawn failed: ${String(err)}`);
     }
     e.proc = proc;
-    if (e.stopping) {
-      proc.kill('SIGKILL');
-      return;
-    }
+    const abandoned = () => {
+      if (!(e.dead || e.stopping || e.gen !== gen)) return false;
+      try {
+        proc.kill('SIGKILL');
+      } catch {
+        /* already dead */
+      }
+      return true;
+    };
+    if (abandoned()) return;
     proc.stderr!.setEncoding('utf8');
     proc.stderr!.on('data', (d: string) => {
       for (const line of d.split('\n')) {
@@ -401,18 +468,19 @@ export class AgentManager extends EventEmitter {
       }
     });
     proc.on('error', (err) => {
-      if (e.stopping) return;
+      if (e.stopping || e.gen !== gen) return;
       e.errored = true;
       this.setStatus(e, 'error', { error: `spawn error: ${err.message}` });
     });
     proc.on('exit', (code, signal) => {
-      if (e.stopping) return;
+      if (e.stopping || e.gen !== gen) return;
       if (e.errored || e.summary.status === 'error') return;
       const tail = e.stderr.slice(-20).join('\n');
       this.cancelPending(e);
       const s = e.summary.status;
       if (s === 'starting' || s === 'working' || s === 'needs_you' || s === 'stuck') {
         e.errored = true;
+        this.noteLimit(e, '');
         this.setStatus(e, 'error', {
           error: oneLine(
             `process exited (code ${code}, signal ${signal})${tail ? ': ' + tail : ''}`,
@@ -441,6 +509,7 @@ export class AgentManager extends EventEmitter {
       clientCapabilities: { fs: { readTextFile: true, writeTextFile: true }, terminal: false },
       clientInfo: { name: 'tower', version: '0.1.0' },
     });
+    if (abandoned()) return;
     const authMethods = (init as { authMethods?: Array<{ id: string }> }).authMethods ?? [];
 
     if (resumeSessionId) {
@@ -452,6 +521,7 @@ export class AgentManager extends EventEmitter {
       } finally {
         e.replaying = false;
       }
+      if (abandoned()) return;
       this.captureControls(e, loaded);
       e.summary.resumable = false;
       this.pushFeed(e, { type: 'status', id: this.nid('st'), at: Date.now(), text: 'Resumed' });
@@ -471,11 +541,13 @@ export class AgentManager extends EventEmitter {
       if (authMethods.length > 0) {
         console.log(`[tower] agent ${e.summary.id} requires auth, trying ${authMethods[0].id}`);
         await conn.authenticate({ methodId: authMethods[0].id });
+        if (abandoned()) return;
         session = await conn.newSession(sessionReq);
       } else {
         throw err;
       }
     }
+    if (abandoned()) return;
     e.sessionId = session.sessionId;
     this.captureControls(e, session);
 
@@ -495,6 +567,7 @@ export class AgentManager extends EventEmitter {
       } catch (err) {
         console.log(`[tower] agent ${e.summary.id}: setSessionMode ${wantMode} failed: ${err}`);
       }
+      if (abandoned()) return;
     }
     this.pushFeed(e, { type: 'status', id: this.nid('st'), at: Date.now(), text: 'Started' });
     await this.runPrompt(e, req.task);
@@ -511,7 +584,7 @@ export class AgentManager extends EventEmitter {
     if (x.modes?.currentModeId) e.summary.mode = x.modes.currentModeId;
     const co = normalizeConfig(x.configOptions);
     if (co) e.summary.configOptions = co;
-    this.emit('agent', e.summary);
+    this.emitAgent(e);
   }
 
   private clientFor(e: AgentEntry): acp.Client {
@@ -520,26 +593,41 @@ export class AgentManager extends EventEmitter {
       requestPermission: (params) => this.onRequestPermission(e, params),
       readTextFile: async (params) => ({ content: await this.guardedRead(e, params.path) }),
       writeTextFile: async (params) => {
-        this.guardPath(e, params.path);
-        await mkdir(path.dirname(params.path), { recursive: true });
-        await writeFile(params.path, params.content, 'utf8');
+        const target = this.guardPath(e, params.path);
+        await mkdir(path.dirname(target), { recursive: true });
+        this.guardPath(e, target); // re-check after mkdir (race with a planted symlink)
+        await writeFile(target, params.content, 'utf8');
         return {};
       },
     };
   }
 
   private guardPath(e: AgentEntry, p: string): string {
-    const resolved = path.resolve(p);
+    const resolved = path.resolve(e.cwd, p);
     let root = path.resolve(e.cwd);
     try {
       root = realpathSync(root); // macOS: /tmp -> /private/tmp
     } catch {
       /* keep unresolved */
     }
-    if (resolved !== root && !resolved.startsWith(root + path.sep)) {
-      throw new Error(`path outside agent cwd: ${p}`);
+    const inside = (x: string) => x === root || x.startsWith(root + path.sep);
+    // realpath the target, or its nearest existing ancestor for new files, so symlinks cannot escape
+    let real: string | undefined;
+    let cur = resolved;
+    const rest: string[] = [];
+    for (;;) {
+      try {
+        real = path.join(realpathSync(cur), ...rest);
+        break;
+      } catch {
+        const parent = path.dirname(cur);
+        if (parent === cur) break;
+        rest.unshift(path.basename(cur));
+        cur = parent;
+      }
     }
-    return resolved;
+    if (!real || !inside(real)) throw new Error(`path outside agent cwd: ${p}`);
+    return real;
   }
 
   private async guardedRead(e: AgentEntry, p: string): Promise<string> {
@@ -553,19 +641,30 @@ export class AgentManager extends EventEmitter {
     const kind = u.sessionUpdate;
     if (kind === 'current_mode_update') {
       e.summary.mode = (u as acp.CurrentModeUpdate).currentModeId;
-      this.emit('agent', e.summary);
+      this.emitAgent(e);
       return;
     }
     if (kind === 'config_option_update') {
       const co = normalizeConfig((u as acp.ConfigOptionUpdate).configOptions);
       if (co) e.summary.configOptions = co;
-      this.emit('agent', e.summary);
+      this.emitAgent(e);
+      return;
+    }
+    if (kind === 'available_commands_update') {
+      const cmds = (u as { availableCommands?: Array<{ name?: unknown; description?: unknown }> }).availableCommands ?? [];
+      e.summary.commands = cmds
+        .filter((c) => typeof c?.name === 'string')
+        .map((c) => ({
+          name: c.name as string,
+          description: typeof c.description === 'string' ? c.description : undefined,
+        }));
+      this.emitAgent(e);
       return;
     }
     if (kind === 'usage_update') {
       const uu = u as acp.UsageUpdate;
       e.summary.usage = { used: uu.used, size: uu.size };
-      this.emit('agent', e.summary);
+      this.emitAgent(e);
       return;
     }
     if (e.replaying) return; // history replay from loadSession: the persisted feed already has it
@@ -588,7 +687,7 @@ export class AgentManager extends EventEmitter {
       }
       if (feedType === 'agent_message') {
         e.summary.lastMessage = oneLine(text, 280);
-        this.emit('agent', e.summary);
+        this.emitAgent(e);
       }
       newMessageBoundary();
       return;
@@ -635,7 +734,7 @@ export class AgentManager extends EventEmitter {
           status: en.status === 'in_progress' ? 'in_progress' : en.status === 'completed' ? 'completed' : 'pending',
         }),
       );
-      this.emit('agent', e.summary);
+      this.emitAgent(e);
       return;
     }
     if (!this.loggedUnknown.has(kind)) {
@@ -657,7 +756,7 @@ export class AgentManager extends EventEmitter {
       detail: t.detail,
       output: t.output,
     });
-    this.emit('agent', e.summary);
+    this.emitAgent(e);
   }
 
   private onRequestPermission(
@@ -699,7 +798,7 @@ export class AgentManager extends EventEmitter {
         title: request.title,
       });
       if (e.summary.status !== 'needs_you') this.setStatus(e, 'needs_you');
-      else this.emit('agent', e.summary);
+      else this.emitAgent(e);
     });
   }
 
@@ -728,8 +827,8 @@ export class AgentManager extends EventEmitter {
     const name = p.request.options.find((o) => o.optionId === optionId)?.name ?? optionId;
     this.resolvePermissionFeed(e, requestId, name);
     e.summary.pendingPermission = e.pendingQueue[0]?.request;
-    if (e.pendingQueue.length === 0) this.setStatus(e, 'working');
-    else this.emit('agent', e.summary); // still needs_you, next request surfaced
+    if (e.pendingQueue.length === 0) this.setStatus(e, this.busyStatus(e));
+    else this.emitAgent(e); // still needs_you, next request surfaced
     return 'ok';
   }
 
@@ -741,19 +840,24 @@ export class AgentManager extends EventEmitter {
 
   private async runPromptInner(e: AgentEntry, text: string): Promise<void> {
     if (!e.conn || !e.sessionId) throw new Error('agent not ready');
+    const gen = e.gen;
+    const turn = ++e.turnId;
+    const mine = () => e.gen === gen && e.turnId === turn && !e.dead;
     e.turnRunning = true;
     e.lastUpdateKind = undefined;
     e.lastMsgId = {};
     this.pushFeed(e, { type: 'user_message', id: this.nid('usr'), at: Date.now(), text });
-    this.setStatus(e, 'working', { stopReason: undefined });
+    this.setStatus(e, this.busyStatus(e), { stopReason: undefined });
     try {
       const res = await e.conn.prompt({
         sessionId: e.sessionId,
         prompt: [{ type: 'text', text }],
       });
+      if (!mine()) return; // superseded (resume / forced cancel / removed)
       e.turnRunning = false;
       if (e.stopping || e.errored) return;
-      this.setStatus(e, 'done', { stopReason: res.stopReason });
+      const after = e.summary.questions?.length ? 'needs_you' : 'done';
+      this.setStatus(e, after, { stopReason: res.stopReason, limitHit: false });
       this.pushFeed(e, {
         type: 'status',
         id: this.nid('st'),
@@ -762,10 +866,22 @@ export class AgentManager extends EventEmitter {
       });
       this.drain(e);
     } catch (err) {
+      if (!mine()) return;
       e.turnRunning = false;
       if (e.stopping) return;
       e.errored = true;
       this.cancelPending(e);
+      const n = e.summary.queued.length;
+      if (n) {
+        e.summary.queued = [];
+        this.pushFeed(e, {
+          type: 'status',
+          id: this.nid('st'),
+          at: Date.now(),
+          text: `${n} queued prompt${n === 1 ? '' : 's'} discarded`,
+        });
+      }
+      this.noteLimit(e, String(err));
       this.setStatus(e, 'error', { error: oneLine(`prompt failed: ${String(err)}`, 400) });
     }
   }
@@ -775,60 +891,93 @@ export class AgentManager extends EventEmitter {
     if (e.summary.status !== 'done') return;
     const next = e.summary.queued.shift();
     if (next === undefined) return;
-    this.emit('agent', e.summary);
+    this.emitAgent(e);
     this.runPrompt(e, next).catch(() => {});
+  }
+
+  // copies uploads into <cwd>/attachments and returns the "Attached:" lines
+  private attach(e: AgentEntry, ids: string[]): string[] | undefined {
+    const ups = ids.map((id) => getUpload(id));
+    if (ups.some((u) => !u)) return undefined;
+    const dir = path.join(e.cwd, 'attachments');
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const lines: string[] = [];
+    for (const u of ups) {
+      const base = path.basename(u!.name || 'file').replace(/^\.+/, '') || 'file';
+      const ext = path.extname(base);
+      const stem = base.slice(0, base.length - ext.length) || 'file';
+      let name = base;
+      for (let i = 1; existsSync(path.join(dir, name)); i++) name = `${stem}-${i}${ext}`;
+      copyFileSync(u!.path, path.join(dir, name));
+      lines.push(`Attached: attachments/${name}`);
+    }
+    return lines;
   }
 
   prompt(
     agentId: string,
     text: string,
     interrupt = false,
-  ): { result: 'ok' | 'notfound' | 'conflict'; queued?: boolean } {
+    attachments?: string[],
+  ): { result: 'ok' | 'notfound' | 'conflict' | 'bad_attachment'; queued?: boolean } {
     const e = this.agents.get(agentId);
     if (!e) return { result: 'notfound' };
     const st = e.summary.status;
     if (st === 'stopped' || st === 'error' || st === 'observed') return { result: 'conflict' };
-    if (st === 'working' || st === 'needs_you' || st === 'starting') {
-      if (interrupt) {
+    if (attachments?.length) {
+      const lines = this.attach(e, attachments);
+      if (!lines) return { result: 'bad_attachment' };
+      text = `${text}\n\n${lines.join('\n')}`;
+    }
+    if (st === 'working' || st === 'needs_you' || st === 'starting' || (st === 'stuck' && e.turnRunning)) {
+      // stuck with a stale turn in flight: never run two prompts at once — queue first and cancel the stale turn
+      if (interrupt || st === 'stuck') {
         e.summary.queued.unshift(text);
-        this.emit('agent', e.summary);
+        this.emitAgent(e);
         if (e.turnRunning) void this.cancelTurn(e);
       } else {
         e.summary.queued.push(text);
-        this.emit('agent', e.summary);
+        this.emitAgent(e);
       }
       return { result: 'ok', queued: true };
     }
-    // done / stuck: send now
-    void (async () => {
-      if (e.turnRunning) {
-        // stuck: a stale turn is still in flight — cancel it and wait before re-prompting
-        e.holdDrain = true;
-        try {
-          await e.conn?.cancel({ sessionId: e.sessionId! });
-        } catch {
-          /* ignore */
-        }
-        try {
-          await Promise.race([e.turnPromise, new Promise((r) => setTimeout(r, 10_000))]);
-        } catch {
-          /* ignore */
-        }
-        e.holdDrain = false;
-        if (e.stopping || e.errored) return;
-      }
-      this.runPrompt(e, text).catch(() => {});
-    })();
+    // done (or stuck with no turn): send now
+    this.runPrompt(e, text).catch(() => {});
     return { result: 'ok', queued: false };
   }
 
+  // session/cancel; if the adapter never ends the turn within 5 s, force it ended and move on
   private async cancelTurn(e: AgentEntry) {
     this.cancelPending(e);
-    if (e.summary.status === 'needs_you') this.setStatus(e, 'working');
+    if (e.summary.status === 'needs_you' || e.summary.status === 'stuck') this.setStatus(e, this.busyStatus(e));
+    const turn = e.turnId;
+    const gen = e.gen;
+    const p = e.turnPromise;
     try {
       if (e.conn && e.sessionId) await e.conn.cancel({ sessionId: e.sessionId });
     } catch {
       /* ignore */
+    }
+    let timer: NodeJS.Timeout | undefined;
+    await Promise.race([
+      p?.catch(() => {}),
+      new Promise<void>((r) => {
+        timer = setTimeout(r, CANCEL_FORCE_MS);
+        timer.unref();
+      }),
+    ]);
+    if (timer) clearTimeout(timer);
+    if (e.turnRunning && e.turnId === turn && e.gen === gen && !e.stopping && !e.errored && this.live(e)) {
+      e.turnId += 1; // the late prompt resolution is ignored
+      e.turnRunning = false;
+      this.setStatus(e, e.summary.questions?.length ? 'needs_you' : 'done', { stopReason: 'cancelled' });
+      this.pushFeed(e, {
+        type: 'status',
+        id: this.nid('st'),
+        at: Date.now(),
+        text: 'Turn ended: cancelled (forced, agent did not answer the cancel)',
+      });
+      this.drain(e);
     }
   }
 
@@ -844,7 +993,7 @@ export class AgentManager extends EventEmitter {
     const e = this.agents.get(agentId);
     if (!e || !Number.isInteger(index) || index < 0 || index >= e.summary.queued.length) return 'notfound';
     e.summary.queued.splice(index, 1);
-    this.emit('agent', e.summary);
+    this.emitAgent(e);
     return 'ok';
   }
 
@@ -855,7 +1004,7 @@ export class AgentManager extends EventEmitter {
     if (!e.summary.modes?.some((m) => m.id === modeId)) return 'invalid';
     await e.conn.setSessionMode({ sessionId: e.sessionId, modeId });
     e.summary.mode = modeId;
-    this.emit('agent', e.summary);
+    this.emitAgent(e);
     return 'ok';
   }
 
@@ -873,7 +1022,7 @@ export class AgentManager extends EventEmitter {
     const co = normalizeConfig((res as { configOptions?: unknown })?.configOptions);
     if (co) e.summary.configOptions = co;
     else opt.currentValue = value;
-    this.emit('agent', e.summary);
+    this.emitAgent(e);
     return 'ok';
   }
 
@@ -881,12 +1030,11 @@ export class AgentManager extends EventEmitter {
     const e = this.agents.get(agentId);
     if (!e) return false;
     const st = e.summary.status;
-    if (st !== 'stopped' && st !== 'error') await this.stop(agentId);
-    else if (e.proc && e.proc.exitCode == null) {
-      e.stopping = true;
-      e.proc.kill('SIGKILL');
-    }
     this.agents.delete(agentId);
+    e.dead = true; // nothing about this card is emitted or persisted again
+    e.stopping = true;
+    if (st !== 'stopped' && st !== 'error') await this.stopEntry(e);
+    else if (e.proc && e.proc.exitCode == null) e.proc.kill('SIGKILL');
     this.emit('agent_removed', agentId);
     this.broadcastCapacity();
     this.scheduleSave();
@@ -929,6 +1077,11 @@ export class AgentManager extends EventEmitter {
   async stop(agentId: string): Promise<boolean> {
     const e = this.agents.get(agentId);
     if (!e) return false;
+    await this.stopEntry(e);
+    return true;
+  }
+
+  private async stopEntry(e: AgentEntry): Promise<void> {
     e.stopping = true;
     this.cancelPending(e); // (a) permission -> cancelled
     if (e.conn && e.sessionId && e.turnRunning) {
@@ -959,7 +1112,6 @@ export class AgentManager extends EventEmitter {
     e.turnRunning = false;
     this.setStatus(e, 'stopped');
     this.pushFeed(e, { type: 'status', id: this.nid('st'), at: Date.now(), text: 'Stopped' });
-    return true;
   }
 
   async stopAll(): Promise<void> {
@@ -1112,11 +1264,12 @@ export class AgentManager extends EventEmitter {
         lastActivityAt: info.activity || Date.now(),
         toolCalls: 0,
         queued: [],
+        interactive: process.env.TOWER_TMUX_INTERACTIVE === '1',
       };
       const prev = this.tmuxAgents.get(id);
       const prevJson = prev ? JSON.stringify(prev.summary) : '';
       if (JSON.stringify(summary) !== prevJson) {
-        this.tmuxAgents.set(id, { summary });
+        this.tmuxAgents.set(id, { summary, session: sess });
         changed.push(summary);
       }
     }
@@ -1160,8 +1313,159 @@ export class AgentManager extends EventEmitter {
       ],
       capacity: this.capacityList(),
       accounts: this.listAccounts(),
+      notes: this.listNotes(),
       host,
     };
+  }
+
+  // real tmux session name of an observed card (never exposed in the API)
+  tmuxTarget(agentId: string): string | undefined {
+    return this.tmuxAgents.get(agentId)?.session;
+  }
+
+  // ---- Wave B: questions (`tower ask`) ----
+  ask(
+    agentId: string,
+    text: string,
+    recommendation?: string,
+  ): { ok: true; questionId: string } | { ok: false; error: 'notfound' } {
+    const e = this.agents.get(agentId);
+    if (!e) return { ok: false, error: 'notfound' };
+    const q: Question = { id: newId(8), agentId, text, recommendation, createdAt: Date.now() };
+    e.summary.questions = [...(e.summary.questions ?? []), q];
+    this.pushFeed(e, { type: 'status', id: this.nid('st'), at: Date.now(), text: `Asked: ${oneLine(text, 400)}` });
+    const st = e.summary.status;
+    if (st === 'stopped' || st === 'error') this.emitAgent(e);
+    else this.setStatus(e, 'needs_you');
+    return { ok: true, questionId: q.id };
+  }
+
+  answer(agentId: string, questionId: string, text: string): 'ok' | 'notfound' | 'conflict' {
+    const e = this.agents.get(agentId);
+    const q = e?.summary.questions?.find((x) => x.id === questionId);
+    if (!e || !q) return 'notfound';
+    e.summary.questions = e.summary.questions!.filter((x) => x.id !== questionId);
+    if (e.summary.status === 'needs_you' && !e.pendingQueue.length && !e.summary.questions.length) {
+      this.setStatus(e, e.turnRunning ? 'working' : 'done');
+    } else this.emitAgent(e);
+    const r = this.prompt(agentId, `[Answer to «${oneLine(q.text, 160)}»] ${text}`);
+    return r.result === 'ok' ? 'ok' : 'conflict';
+  }
+
+  // ---- Wave B: archive / move ----
+  setArchived(agentId: string, archived: boolean): 'ok' | 'notfound' {
+    const e = this.agents.get(agentId);
+    if (!e) return 'notfound';
+    e.summary = { ...e.summary, archived };
+    this.emitAgent(e);
+    return 'ok';
+  }
+
+  async move(
+    agentId: string,
+    accountId: string,
+  ): Promise<{ ok: true; agent: AgentSummary } | { ok: false; error: 'notfound' | 'unknown_account' }> {
+    const e = this.agents.get(agentId);
+    if (!e) return { ok: false, error: 'notfound' };
+    if (!this.accounts) return { ok: false, error: 'unknown_account' };
+    try {
+      this.accounts.envFor(e.summary.kind, accountId);
+    } catch {
+      return { ok: false, error: 'unknown_account' };
+    }
+    const lines: string[] = [];
+    for (const f of e.feed) {
+      if (f.type === 'user_message') lines.push(`User: ${f.text}`);
+      else if (f.type === 'agent_message') lines.push(`Agent: ${f.text}`);
+      else if (f.type === 'tool_call') lines.push(`Tool: ${f.title}${f.status ? ` (${f.status})` : ''}`);
+    }
+    let convo = lines.slice(-40).join('\n');
+    if (convo.length > 12000) convo = convo.slice(convo.length - 12000);
+    const task = `Continue this task on a fresh session. Original task: ${e.summary.task}\n\nConversation so far (most recent last):\n${convo}`;
+    let agent: AgentSummary;
+    try {
+      agent = await this.launch({
+        kind: e.summary.kind,
+        task,
+        name: `${e.summary.name} (moved)`,
+        model: e.summary.model,
+        accountId,
+      });
+    } catch {
+      return { ok: false, error: 'unknown_account' };
+    }
+    const st = e.summary.status;
+    if (st !== 'stopped' && st !== 'error') await this.stopEntry(e);
+    this.setArchived(agentId, true);
+    return { ok: true, agent: this.agents.get(agent.id)?.summary ?? agent };
+  }
+
+  // ---- Wave B: notes ----
+  listNotes(): Note[] {
+    return this.notes;
+  }
+
+  private loadNotes() {
+    if (!this.notesFile) return;
+    try {
+      const data = JSON.parse(readFileSync(this.notesFile, 'utf8'));
+      if (Array.isArray(data)) {
+        this.notes = data.filter((n) => n && typeof n.id === 'string' && typeof n.title === 'string');
+      }
+    } catch {
+      /* no notes yet */
+    }
+  }
+
+  private notesChanged() {
+    if (this.notesFile) {
+      try {
+        mkdirSync(path.dirname(this.notesFile), { recursive: true, mode: 0o700 });
+        const tmp = `${this.notesFile}.${process.pid}.${Date.now()}.tmp`;
+        writeFileSync(tmp, JSON.stringify(this.notes), { mode: 0o600 });
+        chmodSync(tmp, 0o600);
+        renameSync(tmp, this.notesFile);
+      } catch (err) {
+        console.error(`[tower] notes save failed: ${err}`);
+      }
+    }
+    this.emit('notes', this.notes);
+  }
+
+  createNote(title: string, body: string): Note {
+    const n: Note = { id: newId(8), title, body, createdAt: Date.now() };
+    this.notes = [...this.notes, n];
+    this.notesChanged();
+    return n;
+  }
+
+  updateNote(id: string, patch: { title?: string; body?: string; archived?: boolean }): Note | undefined {
+    const i = this.notes.findIndex((n) => n.id === id);
+    if (i < 0) return undefined;
+    const n: Note = { ...this.notes[i] };
+    if (patch.title !== undefined) n.title = patch.title;
+    if (patch.body !== undefined) n.body = patch.body;
+    if (patch.archived !== undefined) n.archived = patch.archived;
+    this.notes = this.notes.map((x, j) => (j === i ? n : x));
+    this.notesChanged();
+    return n;
+  }
+
+  deleteNote(id: string): boolean {
+    if (!this.notes.some((n) => n.id === id)) return false;
+    this.notes = this.notes.filter((n) => n.id !== id);
+    this.notesChanged();
+    return true;
+  }
+
+  // throws Error('unknown account') like launch
+  async startNote(id: string, kind: AgentKind, accountId?: string): Promise<AgentSummary | undefined> {
+    const n = this.notes.find((x) => x.id === id);
+    if (!n) return undefined;
+    const task = n.body.trim() ? `${n.title}\n\n${n.body}` : n.title;
+    const agent = await this.launch({ kind, task, name: n.title.trim() || undefined, accountId });
+    this.updateNote(id, { archived: true });
+    return agent;
   }
 
   shutdown() {
