@@ -121,7 +121,7 @@ try {
       await page.locator('.dialog[aria-label="New board"] .btn-primary').click();
       await page.waitForSelector('[data-board-tab="research"].on');
       ok(page.url().includes('#/board/research'), 'new board created and active');
-      ok((await page.locator('.board[data-board="research"] .col-head').count()) === 3, 'new board has 3 default columns');
+      ok((await page.locator('.board[data-board="research"] .col-head').count()) === 2, 'new board has 2 default columns'); // server change + spec row 30: Working · Done
 
       // launch onto Customers with a customer
       await page.locator('[data-board-tab="customers"]').click();

@@ -336,8 +336,7 @@ export function mockTransport(): Transport {
       id: 'programs',
       name: 'Programs',
       columns: [
-        { id: 'working', name: 'Working', statuses: ['starting', 'working', 'stuck'] },
-        { id: 'needs', name: 'Needs you', statuses: ['needs_you'] },
+        { id: 'working', name: 'Working', statuses: ['needs_you', 'stuck', 'starting', 'working'] },
         { id: 'done', name: 'Done', statuses: ['done', 'stopped', 'error'] },
       ],
     },

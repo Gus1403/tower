@@ -9,7 +9,6 @@ import { Panel } from './Panel';
 import { getState, openAgent, setLaunchOpen, useStore } from './store';
 import { TmuxPanel } from './TmuxPanel';
 import { Inbox, TopBar } from './ui';
-import { QuestionsInbox } from './Questions';
 import { initNotifications } from './notify';
 import { subscribe } from './store';
 import { BoardTabs } from './boards/BoardTabs';
@@ -36,6 +35,8 @@ interface ColDef {
 const dotOf = (st: AgentStatus[]): ColDef['dot'] =>
   st.includes('needs_you') && !st.includes('working') ? 'needs' : st.includes('working') || st.includes('starting') ? 'working' : st.includes('stuck') ? 'stuck' : 'done';
 const colsOf = (b: Board | undefined): ColDef[] => (b?.columns ?? []).map((c) => ({ key: c.id, label: c.name, statuses: c.statuses, dot: dotOf(c.statuses) }));
+
+const PIN: Record<AgentStatus, number> = { needs_you: 0, stuck: 1, starting: 2, working: 2, done: 3, stopped: 3, error: 3, observed: 4 };
 
 function Toasts() {
   const toasts = useStore((s) => s.toasts);
@@ -98,7 +99,10 @@ export function App() {
     const onBoard = live.filter((a) => a.source !== 'tmux' && boardOf(a) === boardId);
     const cols = {} as Record<Col, AgentSummary[]>;
     for (const c of COLS) {
-      cols[c.key] = onBoard.filter((a) => c.statuses.includes(a.status) && agentMatch(q, a)).sort((a, b) => b.lastActivityAt - a.lastActivityAt);
+      // decided: needs_you pinned first, then stuck, then the rest by recency
+      cols[c.key] = onBoard
+        .filter((a) => c.statuses.includes(a.status) && agentMatch(q, a))
+        .sort((a, b) => PIN[a.status] - PIN[b.status] || b.lastActivityAt - a.lastActivityAt);
       // keep finished columns stable: muted stopped/error after done
       if (c.statuses.includes('done'))
         cols[c.key].sort((a, b) => Number(a.status !== 'done') - Number(b.status !== 'done') || b.lastActivityAt - a.lastActivityAt);
@@ -212,7 +216,10 @@ export function App() {
       }}
       onDrop={() => setDragKind(null)}
     >
-      <TopBar search={<SearchBox ref={searchRef} value={q} onChange={setQ} className="search-desk" />} />
+      <TopBar
+        search={<SearchBox ref={searchRef} value={q} onChange={setQ} className="search-desk" />}
+        tabs={<BoardTabs boards={boards} active={boardId} counts={counts} />}
+      />
       {!connected && (
         <div className="reconnect">
           <span className="spin" /> {everConnected ? 'Reconnecting…' : 'Connecting…'}
@@ -220,9 +227,7 @@ export function App() {
       )}
       <main className="main">
         <SearchBox ref={searchRefPhone} value={q} onChange={setQ} className="search-phone" />
-        <BoardTabs boards={boards} active={boardId} counts={counts} />
         <Inbox />
-        <QuestionsInbox />
         {q && order.length === 0 && archived.length === 0 && <p className="search-empty">Nothing matches “{q}”.</p>}
         {total === 0 && allNotes.length === 0 && everConnected && !q ? (
           <div className="empty">
@@ -238,7 +243,7 @@ export function App() {
                 const c = COLS.find((x) => x.key === k);
                 return (
                   <button key={k} role="tab" aria-selected={tab === k} className={`tab tab-${c ? c.dot : 'notes'} ${tab === k ? 'on' : ''}`} onClick={() => setTab(k)}>
-                    {c ? c.label : 'Notes'}
+                    {c ? c.label : 'To do'}
                     <span className="tab-count">{k === 'notes' ? notes.length : (cols[k]?.length ?? 0)}</span>
                   </button>
                 );
@@ -271,7 +276,6 @@ export function App() {
                         <CardRequestedBy a={a} />
                       </div>
                     ))}
-                    {cols[c.key].length === 0 && <div className="col-empty">Nothing here</div>}
                   </div>
                 </section>
               ))}
@@ -282,7 +286,7 @@ export function App() {
           <section className="observed">
             <button className="observed-toggle" onClick={() => setShowObserved((v) => !v)} aria-expanded={showObserved || !!q}>
               <span className="caret">{showObserved || q ? '▾' : '▸'}</span>
-              Observed (tmux)
+              Other sessions
               <span className="col-count">{observed.length}</span>
             </button>
             <div className="observed-grid" hidden={!showObserved && !q}>

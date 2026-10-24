@@ -169,7 +169,7 @@ try {
   await page.locator('.tmux-input').fill('status please');
   await page.keyboard.press('Enter');
   await page.waitForSelector('.tmux-confirm');
-  ok((await page.locator('.tmux-confirm').textContent()).includes('This types into a live session on eva-forge. Send?'), 'first send asks to confirm');
+  ok((await page.locator('.tmux-confirm').textContent()).includes('This types into a live session. Send?'), 'first send asks to confirm'); // spec row 22 (SB's TmuxPanel copy)
   await shot(page, 'wb3-desktop-tmux-confirm');
   await page.locator('.tmux-dontask input').check();
   await page.locator('.tmux-confirm .btn-primary').click();
@@ -195,9 +195,10 @@ try {
   const sw = await bp.evaluate(() => document.documentElement.scrollWidth);
   ok(sw <= 390, `no horizontal overflow at 390 (scrollWidth ${sw})`);
   await shot(bp, 'wb3-phone-board');
-  await bp.locator('.tab', { hasText: 'Notes' }).click();
-  ok(await bp.locator('.col-notes').isVisible(), 'Notes is a tab on phone');
-  await bp.locator('.col-notes .note-add-row').click();
+  // decided spec: Notes → "To do" with a single "+ Note" (row 12: no body "+ Note" row; the head button adds)
+  await bp.locator('.tab', { hasText: 'To do' }).click();
+  ok(await bp.locator('.col-notes').isVisible(), 'To do is a tab on phone');
+  await bp.locator('.col-notes .note-add').click();
   await bp.locator('.note-title-in').fill('Write release notes');
   await bp.locator('.note-edit .btn-primary').click();
   await bp.waitForSelector('.col-notes .note:has-text("Write release notes")');

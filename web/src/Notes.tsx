@@ -59,6 +59,7 @@ function NoteEditor({
 export function NoteCard({ n, focused, onStart }: { n: Note; focused: boolean; onStart: (n: Note) => void }) {
   const [editing, setEditing] = useState(false);
   const [confirmDel, setConfirmDel] = useState(false);
+  const [menu, setMenu] = useState(false);
   if (editing)
     return (
       <NoteEditor
@@ -104,15 +105,19 @@ export function NoteCard({ n, focused, onStart }: { n: Note; focused: boolean; o
             Start
           </button>
           <span className="spacer" />
-          <button className="note-act note-act-edit" onClick={() => setEditing(true)}>
-            Edit
+          <button className="note-act note-more" aria-label="More" aria-haspopup="menu" aria-expanded={menu} onClick={() => setMenu((v) => !v)}>
+            ⋯
           </button>
-          <button className="note-act" onClick={() => notesApi.update(n.id, { archived: true }).catch((e) => toast((e as Error).message))}>
-            Archive
-          </button>
-          <button className="note-act note-act-danger" onClick={() => setConfirmDel(true)}>
-            Delete
-          </button>
+          {menu && (
+            <div className="note-menu" role="menu">
+              <button role="menuitem" className="note-act" onClick={() => notesApi.update(n.id, { archived: true }).catch((e) => toast((e as Error).message))}>
+                Archive
+              </button>
+              <button role="menuitem" className="note-act note-act-danger" onClick={() => setConfirmDel(true)}>
+                Delete
+              </button>
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -132,10 +137,10 @@ export function NotesColumn({
 }) {
   const [adding, setAdding] = useState(false);
   return (
-    <section className={`col col-notes ${className ?? ''}`} aria-label="Notes">
+    <section className={`col col-notes ${className ?? ''}`} aria-label="To do">
       <div className="col-head">
         <span className="col-dot dot-notes" />
-        Notes
+        To do
         <span className="col-count">{notes.length}</span>
         <span className="spacer" />
         <button className="note-add" onClick={() => setAdding(true)} aria-label="Add note">
@@ -153,15 +158,9 @@ export function NotesColumn({
             }}
           />
         )}
-        {!adding && (
-          <button className="note-add-row" onClick={() => setAdding(true)}>
-            + Note
-          </button>
-        )}
         {notes.map((n) => (
           <NoteCard key={n.id} n={n} focused={focusId === `note:${n.id}`} onStart={onStart} />
         ))}
-        {notes.length === 0 && !adding && <div className="col-empty">To-dos you'll hand to an agent</div>}
       </div>
     </section>
   );
@@ -223,7 +222,7 @@ export function StartNoteDialog({ note, onClose }: { note: Note; onClose: () => 
         </label>
         {note.body && <div className="start-preview">{note.body}</div>}
         <div className="dialog-foot">
-          <span className="hint">The note becomes the agent's task</span>
+          <span className="spacer" />
           <button className="btn btn-primary start-go" disabled={busy} onClick={start}>
             {busy ? 'Starting…' : 'Start agent'}
           </button>

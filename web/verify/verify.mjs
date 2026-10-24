@@ -78,14 +78,17 @@ try {
   await page.waitForTimeout(1500);
   ok(await page.locator('.col-working .card').count() >= 2, 'working column has cards');
   ok((await page.locator('.inbox-row').count()) === 1, 'needs-you inbox shows 1 row');
-  ok((await page.locator('.inbox-row').innerText()).includes('npm install vite@5.4.10'), 'inbox row shows the command detail');
+  // spec row 19: the detail now sits behind <details>"Details" — still in the row, read via textContent
+  ok(((await page.locator('.inbox-row').textContent()) ?? '').includes('npm install vite@5.4.10'), 'inbox row shows the command detail');
   await shot(page, 'a-desktop-board');
 
   // allow once from inbox
   await page.locator('.inbox-row button', { hasText: 'Allow once' }).click();
   await page.waitForTimeout(50);
-  ok(await page.locator('.inbox').isHidden(), 'inbox row disappears after Allow once');
-  ok((await page.locator('.col-needs .card', { hasText: 'landing-page' }).count()) === 0, 'landing-page left the needs-you column');
+  // spec row 2: the merged Needs-you section also holds questions, so assert the permission row itself is gone
+  ok((await page.locator('.inbox-row').count()) === 0, 'inbox row disappears after Allow once');
+  // decided spec: no Needs-you column — needs_you is a pinned amber card inside Working, so check the card's state left needs_you
+  ok((await page.locator('.card.card-needs_you', { hasText: 'landing-page' }).count()) === 0, 'landing-page left needs-you');
   await page.waitForTimeout(800);
   ok((await page.locator('.col-working .card', { hasText: 'landing-page' }).count()) === 1, 'landing-page moved to Working');
 
@@ -158,7 +161,8 @@ try {
   await p.waitForSelector('.inbox-row');
   await p.waitForTimeout(1200);
   ok(await p.locator('.tabs').isVisible(), 'phone shows tabs');
-  ok((await p.locator('.tab.on').innerText()).startsWith('Needs you'), 'Needs you tab is first and selected');
+  // decided spec: no Needs-you column — needs_you is pinned first inside Working, so Working is the first, selected tab
+  ok((await p.locator('.tab.on').innerText()).startsWith('Working'), 'Working tab (holding needs-you first) is first and selected');
   await shot(p, 'd-phone-board');
   await p.locator('.tab', { hasText: 'Working' }).click();
   await shot(p, 'd2-phone-working');
@@ -180,16 +184,17 @@ try {
   await b.goto(`${base}/?mock=1`);
   await b.waitForSelector('.card');
   await b.waitForTimeout(800);
-  const inInbox = (await b.locator('.qinbox .q-row').count()) > 0;
-  console.log(`  (QuestionsInbox mounted in App: ${inInbox})`);
+  // spec row 2: questions now live in the merged Needs-you section (.inbox), not a separate .qinbox
+  const inInbox = (await b.locator('.inbox .q-row').count()) > 0;
+  console.log(`  (questions in the merged inbox: ${inInbox})`);
   await b.locator('.card', { hasText: 'fix-tests' }).click();
   await b.waitForSelector('.panel .q-row');
   await b.waitForTimeout(400);
   await shot(b, 'wb2-desktop-question');
-  const qscope = inInbox ? '.qinbox' : '.panel';
+  const qscope = '.panel';
+  // spec row 18: "Send recommendation" sends directly (was: fill the box, then Enter); delivery is still asserted below
+  ok((await b.locator(`${qscope} .q-rec`).first().innerText()).includes('Make the backoff injectable'), 'recommendation is shown');
   await b.locator(`${qscope} .q-use`).first().click();
-  ok((await b.locator(`${qscope} .q-input`).first().inputValue()).startsWith('Make the backoff injectable'), 'Use recommendation fills the answer');
-  await b.locator(`${qscope} .q-input`).first().press('Enter');
   await b.waitForSelector('.q-row', { state: 'detached', timeout: 1500 });
   ok((await b.locator('.q-row').count()) === 0, 'answered question row disappears');
   await b.waitForSelector('.panel .bubble:has-text("[Answer to")', { timeout: 3000 });
@@ -250,7 +255,7 @@ try {
   await bp.waitForSelector('.tabs');
   await bp.waitForTimeout(800);
   await shot(bp, 'wb2-phone-board');
-  await bp.locator('.tab', { hasText: 'Needs you' }).click();
+  await bp.locator('.tab', { hasText: 'Working' }).click(); // decided spec: needs-you cards live pinned in Working
   await bp.locator('.card', { hasText: 'fix-tests' }).click();
   await bp.waitForSelector('.panel .q-row');
   await bp.waitForTimeout(400);

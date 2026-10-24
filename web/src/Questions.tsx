@@ -38,7 +38,6 @@ export function QuestionCard({ a, q, showAgent }: { a: AgentSummary; q: Question
             </button>
           </>
         )}
-        <span className="q-tag">Question</span>
       </div>
       <div className="q-text">{q.text}</div>
       {q.recommendation && (
@@ -46,8 +45,8 @@ export function QuestionCard({ a, q, showAgent }: { a: AgentSummary; q: Question
           <span className="q-rec-text">
             <span className="q-rec-label">Recommended:</span> {q.recommendation}
           </span>
-          <button className="q-use" onClick={() => setText(q.recommendation!)}>
-            Use recommendation
+          <button className="q-use" onClick={() => void sendAnswer(a, q, q.recommendation!)}>
+            Send recommendation
           </button>
         </div>
       )}

@@ -8,7 +8,7 @@
 .wbd-tab-wrap { position: relative; display: inline-flex; align-items: center; flex: none; }
 .wbd-tab {
   display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border: 1px solid transparent;
-  border-radius: 7px; background: transparent; color: var(--tx2); font: inherit; font-size: 13px; font-weight: 500;
+  border-radius: 8px; background: transparent; color: var(--tx2); font: inherit; font-size: 13px; font-weight: 500;
   cursor: pointer; white-space: nowrap;
 }
 .wbd-tab:hover { background: var(--bg2); color: var(--tx); }

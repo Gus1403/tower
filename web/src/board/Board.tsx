@@ -1,7 +1,7 @@
 import { forwardRef, useState } from 'react';
 import type { AgentSummary, Note } from '../../../shared/contract';
 import { toast } from '../store';
-import { AgentCard, KindBadge } from '../ui';
+import { AgentCard } from '../ui';
 import { notesApi, setArchived } from './api-extra';
 
 export const DT_AGENT = 'application/x-tower-agent';
@@ -38,11 +38,9 @@ export function BoardCard({ a, selected, focused }: { a: AgentSummary; selected:
       )}
       {observed &&
         (a.interactive ? (
-          <div className="live-hint">Live · click to type into it</div>
+          <div className="live-hint">Live — opens a terminal</div>
         ) : (
-          <div className="ro-hint">
-            Read-only (set <code>TOWER_TMUX_INTERACTIVE=1</code>)
-          </div>
+          <div className="ro-hint">Read-only</div>
         ))}
     </div>
   );
@@ -90,7 +88,7 @@ export function ArchivedSection({
         <div className="archived-body">
           {agents.map((a) => (
             <div key={a.id} className="archived-item" data-archived-id={a.id}>
-              <KindBadge kind={a.kind} />
+              <span className="col-dot archived-dot" />
               <span className="archived-name">{a.name}</span>
               <button className="btn btn-secondary btn-sm" onClick={() => archive(a.id, false)}>
                 Restore
@@ -99,7 +97,7 @@ export function ArchivedSection({
           ))}
           {notes.map((x) => (
             <div key={x.id} className="archived-item" data-archived-note={x.id}>
-              <span className="col-dot dot-notes" />
+              <span className="col-dot archived-dot" />
               <span className="archived-name">{x.title}</span>
               <button
                 className="btn btn-secondary btn-sm"

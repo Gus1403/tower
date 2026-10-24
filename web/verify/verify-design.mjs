@@ -95,7 +95,7 @@ for (const theme of ['light', 'dark']) {
     await shot(page, `${tag}-new-agent`);
     await page.keyboard.press('Escape');
     if (dev === 'phone') {
-      await page.locator('.tab', { hasText: 'Notes' }).click().catch(() => {});
+      await page.locator('.tab', { hasText: 'To do' }).click().catch(() => {}); // decided: Notes → To do
       await page.waitForTimeout(300);
       await shot(page, `${tag}-notes`);
     }

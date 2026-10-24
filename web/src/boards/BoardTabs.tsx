@@ -104,7 +104,7 @@ export function BoardTabs({ boards, active, counts }: { boards: Board[]; active:
               {menu === b.id && (
                 <div className="wbd-menu" role="menu" onClick={(e) => e.stopPropagation()}>
                   <button role="menuitem" disabled={n > 0} title={n > 0 ? 'Move or archive its cards first' : undefined} onClick={() => void del(b)}>
-                    Delete board{n > 0 ? ' (not empty)' : ''}
+                    Delete board
                   </button>
                 </div>
               )}
@@ -158,7 +158,7 @@ export function NewBoardDialog({ onClose }: { onClose: () => void }) {
           <input ref={ref} value={name} placeholder="e.g. Research" onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && void submit()} />
         </label>
         <div className="dialog-foot">
-          <span className="hint">Columns: Working · Needs you · Done</span>
+          <span className="hint">Columns: Working · Done</span>
           <button className="btn btn-primary" disabled={!name.trim() || busy} onClick={() => void submit()}>
             Create board
           </button>
