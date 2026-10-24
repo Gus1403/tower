@@ -1,0 +1,160 @@
+// Headless verification of the Tower web UI in mock mode. Serves web/dist via `vite preview`.
+import { spawn } from 'node:child_process';
+import { mkdirSync } from 'node:fs';
+import net from 'node:net';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { chromium } from 'playwright';
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+const webDir = path.resolve(here, '..');
+const out = path.join(here, 'out');
+mkdirSync(out, { recursive: true });
+
+const port = await new Promise((res) => {
+  const s = net.createServer();
+  s.listen(0, '127.0.0.1', () => {
+    const p = s.address().port;
+    s.close(() => res(p));
+  });
+});
+
+const server = spawn('npx', ['vite', 'preview', '--host', '127.0.0.1', '--port', String(port), '--strictPort'], {
+  cwd: webDir,
+  stdio: ['ignore', 'pipe', 'pipe'],
+});
+const base = `http://127.0.0.1:${port}`;
+for (let i = 0; i < 100; i++) {
+  try {
+    if ((await fetch(base)).ok) break;
+  } catch {}
+  await new Promise((r) => setTimeout(r, 150));
+}
+
+const errors = [];
+const failed = [];
+const apiHits = [];
+let checks = 0;
+const ok = (cond, msg) => {
+  if (!cond) throw new Error(`ASSERT FAILED: ${msg}`);
+  checks++;
+  console.log(`  ✓ ${msg}`);
+};
+
+// Prefer the bundled browser; fall back to an already-cached headless shell (no download needed).
+import { existsSync, readdirSync } from 'node:fs';
+import os from 'node:os';
+function cachedShell() {
+  const root = path.join(os.homedir(), 'Library/Caches/ms-playwright');
+  if (!existsSync(root)) return undefined;
+  for (const d of readdirSync(root).filter((x) => x.startsWith('chromium_headless_shell-')).sort().reverse()) {
+    const p = path.join(root, d, 'chrome-headless-shell-mac-arm64', 'chrome-headless-shell');
+    if (existsSync(p)) return p;
+  }
+}
+const executablePath = existsSync(chromium.executablePath()) ? undefined : cachedShell();
+const browser = await chromium.launch({ executablePath });
+const wire = (page) => {
+  page.on('console', (m) => m.type() === 'error' && errors.push(m.text()));
+  page.on('pageerror', (e) => errors.push(String(e)));
+  page.on('requestfailed', (r) => failed.push(`${r.url()} ${r.failure()?.errorText}`));
+  page.on('request', (r) => new URL(r.url()).pathname.startsWith('/api') && apiHits.push(r.url()));
+  page.on('response', (r) => r.status() >= 400 && failed.push(`${r.url()} ${r.status()}`));
+};
+const shot = async (page, name) => {
+  const f = path.join(out, `${name}.png`);
+  await page.screenshot({ path: f });
+  console.log(`  ▣ ${f}`);
+};
+
+try {
+  // ---------- desktop ----------
+  console.log('desktop 1440x900');
+  const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 2 });
+  const page = await ctx.newPage();
+  wire(page);
+  await page.goto(`${base}/?mock=1`);
+  await page.waitForSelector('.inbox:not([hidden]) .inbox-row');
+  await page.waitForTimeout(1500);
+  ok(await page.locator('.col-working .card').count() >= 2, 'working column has cards');
+  ok((await page.locator('.inbox-row').count()) === 1, 'needs-you inbox shows 1 row');
+  ok((await page.locator('.inbox-row').innerText()).includes('npm install vite@5.4.10'), 'inbox row shows the command detail');
+  await shot(page, 'a-desktop-board');
+
+  // allow once from inbox
+  await page.locator('.inbox-row button', { hasText: 'Allow once' }).click();
+  await page.waitForTimeout(50);
+  ok(await page.locator('.inbox').isHidden(), 'inbox row disappears after Allow once');
+  ok((await page.locator('.col-needs .card').count()) === 0, 'needs-you column is empty');
+  await page.waitForTimeout(800);
+  ok((await page.locator('.col-working .card', { hasText: 'landing-page' }).count()) === 1, 'landing-page moved to Working');
+
+  // open a panel with plan + tool calls
+  await page.locator('.card', { hasText: 'api-routes' }).click();
+  await page.waitForSelector('.panel .f-tool');
+  await page.waitForTimeout(2600);
+  ok((await page.locator('.panel .plan li').count()) === 5, 'panel shows the plan checklist');
+  ok((await page.locator('.panel .f-tool').count()) >= 5, 'panel feed shows tool calls');
+  ok((await page.locator('.panel .composer textarea').isDisabled()), 'composer disabled while working');
+  await shot(page, 'b-desktop-panel');
+
+  // stop it, then prompt
+  await page.locator('.panel button', { hasText: 'Stop' }).click();
+  await page.waitForSelector('.panel .status-stopped');
+  ok(true, 'Stop moves the agent to stopped');
+  await page.keyboard.press('Escape');
+
+  // docs (done) accepts a prompt
+  await page.locator('.card', { hasText: 'docs' }).first().click();
+  await page.waitForSelector('.panel .f-agent');
+  await page.locator('.panel .composer textarea').fill('Add a troubleshooting section');
+  await page.keyboard.press('Enter');
+  await page.waitForSelector('.panel .status-working');
+  ok((await page.locator('.panel .bubble', { hasText: 'troubleshooting' }).count()) === 1, 'prompt shows as user bubble and agent goes working');
+  await page.keyboard.press('Escape');
+
+  // new agent dialog + launch
+  await page.locator('.new-btn').click();
+  await page.waitForSelector('.dialog');
+  await page.locator('.segmented button', { hasText: 'Codex' }).click();
+  await page.locator('.dialog textarea').fill('Add dark mode to the settings page and persist the choice');
+  await page.locator('.dialog input').fill('dark-mode');
+  await page.waitForTimeout(300);
+  await shot(page, 'c-desktop-new-agent');
+  await page.locator('.dialog button', { hasText: 'Launch' }).click();
+  await page.waitForSelector('.panel .panel-name:has-text("dark-mode")');
+  await page.waitForSelector('.panel .status-working', { timeout: 4000 });
+  ok(true, 'launch opens the new agent panel and it starts working');
+  await page.waitForTimeout(2500);
+  await shot(page, 'b2-desktop-launched');
+  await ctx.close();
+
+  // ---------- phone ----------
+  console.log('phone 390x844');
+  const pctx = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true });
+  const p = await pctx.newPage();
+  wire(p);
+  await p.goto(`${base}/?mock=1`);
+  await p.waitForSelector('.inbox-row');
+  await p.waitForTimeout(1200);
+  ok(await p.locator('.tabs').isVisible(), 'phone shows tabs');
+  ok((await p.locator('.tab.on').innerText()).startsWith('Needs you'), 'Needs you tab is first and selected');
+  await shot(p, 'd-phone-board');
+  await p.locator('.tab', { hasText: 'Working' }).click();
+  await shot(p, 'd2-phone-working');
+  await p.locator('.card', { hasText: 'refactor-auth' }).click();
+  await p.waitForSelector('.panel .f-tool');
+  await p.waitForTimeout(2000);
+  await shot(p, 'e-phone-sheet');
+  await pctx.close();
+} finally {
+  await browser.close();
+  server.kill();
+}
+
+console.log(`checks passed: ${checks}`);
+console.log(`console errors: ${errors.length}`, errors);
+console.log(`failed requests: ${failed.length}`, failed);
+console.log(`/api requests in mock mode: ${apiHits.length}`, apiHits);
+if (errors.length || failed.length || apiHits.length) process.exit(1);
+console.log('VERIFY OK');
