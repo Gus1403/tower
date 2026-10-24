@@ -76,9 +76,9 @@ try {
   await page.screenshot({ path: path.join(out, 'wc-board-desktop.png') });
 
   // open the full accounts panel
-  await page.locator('button.cap').first().click();
+  await page.locator('button.accounts-btn').click() /* spec: one Accounts button replaces capacity chips */;
   await page.waitForSelector('.acc-panel');
-  await page.locator('.acc-all').click();
+  if (await page.locator('.acc-all').count()) await page.locator('.acc-all').click();
   await page.waitForTimeout(250);
   const counts = await page.locator('.acc-count').allInnerTexts();
   console.log('group counts:', counts);
@@ -146,11 +146,11 @@ try {
   await p.waitForTimeout(500);
   await p.screenshot({ path: path.join(out, 'wc-board-phone.png') });
   ok((await p.locator('.card .card-moved').count()) >= 1, 'moved badge on phone');
-  await p.locator('button.cap').nth(1).click();
+  await p.locator('button.accounts-btn').click() /* spec: one Accounts button replaces capacity chips */;
   await p.waitForSelector('.acc-panel');
   await p.waitForTimeout(300);
   await p.screenshot({ path: path.join(out, 'wc-accounts-claude-phone.png') });
-  await p.locator('.acc-all').click();
+  if (await p.locator('.acc-all').count()) await p.locator('.acc-all').click();
   await p.waitForTimeout(200);
   await p.screenshot({ path: path.join(out, 'wc-accounts-phone.png') });
   await p.locator('.acc-body').evaluate((el) => (el.scrollTop = el.scrollHeight));

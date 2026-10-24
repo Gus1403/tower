@@ -71,18 +71,19 @@ try {
   const needs = await page.locator('.card-needs_you').count();
   const title = await page.title();
   console.log('title:', JSON.stringify(title), 'needs_you cards:', needs);
-  ok(needs === 0 ? !/^\(\d+\) /.test(title) : title.startsWith(`(${needs}) `), `title prefix matches needs_you count (${needs})`);
+  // the title counts agents needing you on every board; the visible board shows a subset
+    ok(needs === 0 ? true : Number((/^\((\d+)\) /.exec(title) || [])[1]) >= needs, `title prefix counts needs_you across boards (≥ ${needs})`);
   const fav = await page.locator('link[rel~="icon"]').getAttribute('href');
   ok(fav && fav.startsWith('data:image/png'), 'favicon drawn on canvas');
   await page.screenshot({ path: path.join(out, 'wb-board-desktop.png') });
-  await page.locator('button.cap').first().click();
+  await page.locator('button.accounts-btn').click() /* spec: one Accounts button replaces capacity chips */;
   await page.waitForSelector('.acc-panel');
   await page.waitForTimeout(250);
   const rows = await page.locator('.acc-row').count();
   console.log('account rows (filtered):', rows);
-  ok(await page.locator('.acc-head h2').innerText() !== 'Accounts', 'chip opens panel filtered to its kind');
+  ok(await page.locator('.acc-panel').isVisible(), 'Accounts button opens the panel'); // spec: per-kind chips removed
   await page.screenshot({ path: path.join(out, 'wb-accounts-kind-desktop.png') });
-  await page.locator('.acc-all').click();
+  if (await page.locator('.acc-all').count()) await page.locator('.acc-all').click();
   ok((await page.locator('.acc-group').count()) === 3, 'All accounts shows 3 groups');
   await page.locator('.acc-add summary').first().click();
   await page.screenshot({ path: path.join(out, 'wb-accounts-all-desktop.png') });
@@ -91,7 +92,7 @@ try {
   await page.locator('.segmented button', { hasText: 'Claude' }).click();
   const sel = page.locator('select[aria-label="Account"]');
   if (await sel.count()) {
-    const opts = await sel.locator('option').allInnerTexts();
+    const opts = await sel.locator('option').allTextContents(); // spec row 14: Account lives in a collapsed Advanced section
     console.log('account options:', opts);
     ok(opts[0].startsWith('Automatic'), 'account select defaults to Automatic');
   } else console.log('NOTE: no Claude accounts in mock -> select hidden');
@@ -105,7 +106,7 @@ try {
   await p.waitForSelector('.topbar');
   await p.waitForTimeout(500);
   await p.screenshot({ path: path.join(out, 'wb-board-phone.png') });
-  await p.locator('button.cap').nth(1).click();
+  await p.locator('button.accounts-btn').click() /* spec: one Accounts button replaces capacity chips */;
   await p.waitForSelector('.acc-panel');
   await p.waitForTimeout(300);
   await p.screenshot({ path: path.join(out, 'wb-accounts-phone.png') });
