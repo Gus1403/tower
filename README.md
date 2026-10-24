@@ -81,6 +81,21 @@ for stronger isolation. Never expose it to the public internet.
 | Claude Code | `claude-agent-acp` | session created in mode `default` with skip-permissions disabled |
 | Codex | `codex-acp` | mode `read-only`: asks before running commands |
 
+## Multiple subscriptions
+
+People who pay for several Claude or Codex subscriptions keep one config home per account (`~/.claude-N`,
+`~/.codex-N`). Tower discovers them, shows each account's plan, login state and running agents in the Accounts panel
+(with the exact login command for any account that is logged out), and lets you launch an agent on a specific
+account or on "Automatic", the logged-in account with the most headroom.
+
+## Roadmap
+
+- "Continue on another account" when an account hits its limit (persisted session + ACP `loadSession`).
+- Existing tmux sessions as full cards: send text and keys, live terminal (opt-in, confirmation per send).
+- `tower ask`: a tiny CLI agents call to put a question in the Needs-you inbox; answers return to the session.
+- Web Push to the phone once served over HTTPS; dictation, attachments and `/` commands in the composer.
+- Boards, notes, routines, archive, keyboard "next" (J), search; sign-in with Google through Cloudflare Access.
+
 ## How it was built
 
 Everything in this repository was written on 2026-10-24 during the hackathon, by Devin: a lead Devin session wrote
