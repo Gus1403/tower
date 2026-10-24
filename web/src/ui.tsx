@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo } from 'react';
+import { memo, useCallback, useEffect, useMemo, type ReactNode } from 'react';
 import type { AgentKind, AgentStatus, AgentSummary, Capacity, PermissionOption, PermissionRequest } from '../../shared/contract';
 import { api } from './api';
 import { getState, openAgent, setLaunchOpen, toast, upsertAgent, useNow, useStore } from './store';
@@ -118,7 +118,7 @@ function CapacityChip({ c }: { c: Capacity }) {
   );
 }
 
-export function TopBar() {
+export function TopBar({ search }: { search?: ReactNode } = {}) {
   const agents = useStore((s) => s.agents);
   const capacity = useStore((s) => s.capacity);
   const host = useStore((s) => s.host);
@@ -146,6 +146,7 @@ export function TopBar() {
         <span className={counts.stuck ? 'hl-red' : ''}><b>{counts.stuck}</b> stuck</span>
       </div>
       <div className="spacer" />
+      {search}
       <div className="caps">
         {capacity.map((c) => (
           <CapacityChip key={c.kind} c={c} />
