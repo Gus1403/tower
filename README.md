@@ -25,7 +25,22 @@ board above every agent on your own machine — your repos, your secrets, the su
 - **Agent panel**: the live feed (messages, thoughts, tool calls, plan) and a composer to keep talking to the agent.
 - **Stuck detection**: a working agent that goes silent past a threshold turns red.
 - **Capacity chips**: which agent kinds are installed, logged in and running.
-- **Observed sessions**: existing tmux agent sessions on the host appear as read-only cards.
+- **Observed sessions**: existing tmux agent sessions on the host appear as read-only cards (redacted by default);
+  opt-in, allow-listed sessions become interactive (live screen, send text and keys, confirmation per card).
+- **Talk any time**: messages typed while an agent works are queued and sent when its turn ends; "Interrupt & send"
+  cancels the turn first. Mode, model and effort switch live over ACP; a context bar shows how full the window is.
+- **Rich conversation**: Markdown replies, expandable tool output, `/` command menu, attachments (drag, paste,
+  paperclip) and dictation.
+- **Questions from agents**: `tower ask "…"` (a tiny CLI on a private unix socket) puts a question with a recommended
+  answer in the inbox; the answer returns to the agent as its next message.
+- **Sessions talking to each other**: `tower send --to <agent> "…"` and `tower handoff "task"`, which opens a linked
+  session and delivers its result back to the requester; boards for programs and customer-dedicated sessions.
+- **Multiple subscriptions + rotation**: discovers every Claude/Codex config home, shows plan, login state, usage and
+  reset countdowns; launches on a chosen account or "Automatic"; when an account hits its limit, auto-rotate moves the
+  agent to the next available account and logs it ([comparison with my earlier tool](docs/subswitch-vs-tower.md)).
+- **Survives restarts**: cards, feeds, notes and rotation state persist; Resume reloads a session over ACP.
+- **Organize**: notes that start agents, archive, search, J/K navigation, drag and drop, light and dark themes,
+  attention alerts and notifications (HTTPS inside the tailnet).
 
 ## Screenshots
 
@@ -90,11 +105,9 @@ account or on "Automatic", the logged-in account with the most headroom.
 
 ## Roadmap
 
-- "Continue on another account" when an account hits its limit (persisted session + ACP `loadSession`).
-- Existing tmux sessions as full cards: send text and keys, live terminal (opt-in, confirmation per send).
-- `tower ask`: a tiny CLI agents call to put a question in the Needs-you inbox; answers return to the session.
-- Web Push to the phone once served over HTTPS; dictation, attachments and `/` commands in the composer.
-- Boards, notes, routines, archive, keyboard "next" (J), search; sign-in with Google through Cloudflare Access.
+- True Web Push when the browser is closed (VAPID); today notifications work while the app is open or backgrounded.
+- Routines (scheduled persistent sessions) and sign-in with Google through Cloudflare Access.
+- Per-agent socket credentials so one agent can never ask or send as another.
 
 ## How it was built
 
