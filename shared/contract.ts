@@ -58,6 +58,34 @@ export interface AgentSummary {
   stopReason?: string; // ACP stopReason of the last turn: end_turn | cancelled | max_tokens | refusal | ...
   error?: string;
   toolCalls: number; // count of tool calls so far
+  // ---- Wave A additions ----
+  queued: string[]; // prompts waiting for the current turn to end (sent FIFO, one per turn)
+  usage?: { used: number; size: number }; // context tokens from ACP usage_update
+  mode?: string; // current session mode id (ACP current_mode_update / setSessionMode)
+  modes?: { id: string; name: string }[]; // modes the agent offers (newSession.modes.availableModes)
+  configOptions?: ConfigOption[]; // e.g. model, effort, thought_level (newSession.configOptions / config_option_update)
+  accountId?: string; // Account.id the agent was launched with
+  resumable?: boolean; // persisted from a previous server run; POST /resume reloads it (ACP loadSession)
+}
+
+export interface ConfigOption {
+  id: string; // ACP config option id, e.g. "model"
+  name: string;
+  currentValue?: string;
+  options: { value: string; name: string }[];
+}
+
+export interface Account {
+  id: string; // opaque, url-safe, e.g. "claude-12" (derived from the home dir basename)
+  kind: AgentKind;
+  label: string; // e.g. "Claude · ~/.claude-12"
+  home?: string; // CLAUDE_CONFIG_DIR / CODEX_HOME value; undefined = the CLI default
+  loggedIn: boolean | null; // null = unknown
+  plan?: string; // e.g. "max", "pro", "Devin Max"
+  usedPct?: number; // 0..100 when measurable (e.g. Codex weekly limit), else undefined
+  detail?: string; // one line, no emails
+  running: number; // tower agents launched with this account and not stopped/error
+  loginCommand: string; // exact shell command the owner runs to log this account in
 }
 
 export type FeedItem =
@@ -73,6 +101,7 @@ export type FeedItem =
       toolKind?: string;
       status: 'pending' | 'in_progress' | 'completed' | 'failed';
       detail?: string; // max 400 chars
+      output?: string; // tool result text for "expand" (rawOutput/content), max 8000 chars
     }
   | {
       type: 'permission';
@@ -96,6 +125,7 @@ export interface Capacity {
 export interface StateResponse {
   agents: AgentSummary[];
   capacity: Capacity[];
+  accounts: Account[];
   host: string; // os.hostname()
 }
 
@@ -103,7 +133,18 @@ export interface StateResponse {
 // GET  /api/state                         -> StateResponse
 // GET  /api/agents/:id/feed               -> FeedItem[]   (full feed, oldest first)
 // POST /api/agents                        body LaunchRequest -> AgentSummary (201)
-// POST /api/agents/:id/prompt             body { text: string } -> 202 (409 if status is working/needs_you/starting)
+// POST /api/agents/:id/prompt             body { text: string; interrupt?: boolean } -> 202 { queued: boolean }
+//      Wave A: accepted in any live status. done/stuck -> sent now. working/needs_you/starting -> appended to
+//      AgentSummary.queued and sent when the turn ends; with interrupt:true the running turn is cancelled
+//      (session/cancel, pending permissions answered cancelled) and this text is sent right after it ends.
+//      409 only for stopped/error/observed.
+// POST /api/agents/:id/interrupt          -> 200: session/cancel the running turn (process stays alive), queue kept
+// POST /api/agents/:id/mode               body { modeId: string } -> 200 (ACP setSessionMode; 400 if not offered)
+// POST /api/agents/:id/config             body { configId: string; value: string } -> 200 (ACP setSessionConfigOption)
+// DELETE /api/agents/:id/queue/:index     -> 200 removes one queued prompt
+// POST /api/agents/:id/resume             -> 202: for resumable agents, spawn + loadSession(sessionId) on the same account
+// DELETE /api/agents/:id                  -> 200: stops if live and removes the card (tower agents only)
+// GET  /api/accounts                      -> Account[] (also in StateResponse.accounts and WS 'accounts' events)
 // POST /api/agents/:id/permission         body { requestId: string; optionId: string } -> 200 (404 if no such pending request)
 //      ACP reply is nested: { outcome: { outcome: 'selected', optionId } }
 // POST /api/agents/:id/stop               -> 200: (a) answer any pending permission { outcome: { outcome: 'cancelled' } },
@@ -127,6 +168,7 @@ export interface LaunchRequest {
   task: string; // first prompt, required, non-empty
   name?: string; // default: first 4 words of task
   model?: string; // passed to the agent when supported (devin: --model)
+  accountId?: string; // Account.id; omitted or 'auto' = the logged-in account of that kind with the lowest usedPct
 }
 
 // ---- WebSocket: GET /api/ws?token=... (server -> client only) ----
@@ -134,4 +176,6 @@ export type ServerEvent =
   | { type: 'snapshot'; state: StateResponse } // sent once on connect
   | { type: 'agent'; agent: AgentSummary } // upsert by agent.id
   | { type: 'feed'; agentId: string; item: FeedItem } // upsert by item.id within agentId
-  | { type: 'capacity'; capacity: Capacity[] };
+  | { type: 'capacity'; capacity: Capacity[] }
+  | { type: 'accounts'; accounts: Account[] }
+  | { type: 'agent_removed'; agentId: string };
