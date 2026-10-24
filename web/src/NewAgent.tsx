@@ -3,6 +3,7 @@ import type { AgentKind } from '../../shared/contract';
 import { api } from './api';
 import { openAgent, setLaunchOpen, toast, upsertAgent, useStore } from './store';
 import { KIND_LABEL } from './ui';
+import { useAccounts } from './Accounts';
 
 const KINDS: AgentKind[] = ['devin', 'claude', 'codex'];
 
@@ -13,6 +14,8 @@ export function NewAgentDialog() {
   const [task, setTask] = useState('');
   const [name, setName] = useState('');
   const [busy, setBusy] = useState(false);
+  const [accountId, setAccountId] = useState('');
+  const accounts = useAccounts().filter((a) => a.kind === kind);
   const ta = useRef<HTMLTextAreaElement>(null);
 
   const avail = (k: AgentKind) => capacity.find((c) => c.kind === k)?.available ?? true;
@@ -36,7 +39,7 @@ export function NewAgentDialog() {
     if (!task.trim() || busy || !avail(kind)) return;
     setBusy(true);
     try {
-      const a = await api.launch({ kind, task: task.trim(), name: name.trim() || undefined });
+      const a = await api.launch({ kind, task: task.trim(), name: name.trim() || undefined, accountId: accountId || undefined });
       upsertAgent(a);
       setTask('');
       setName('');
@@ -66,7 +69,10 @@ export function NewAgentDialog() {
               aria-checked={kind === k}
               disabled={!avail(k)}
               className={kind === k ? 'on' : ''}
-              onClick={() => setKind(k)}
+              onClick={() => {
+                setKind(k);
+                setAccountId('');
+              }}
               title={capacity.find((c) => c.kind === k)?.detail}
             >
               <span className={`cap-dot kind-dot-${k}`} />
@@ -74,6 +80,21 @@ export function NewAgentDialog() {
             </button>
           ))}
         </div>
+        {accounts.length > 0 && (
+          <label className="field">
+            <span>Account</span>
+            <select value={accountId} onChange={(e) => setAccountId(e.target.value)} aria-label="Account">
+              <option value="">Automatic (most headroom)</option>
+              {accounts.map((a) => (
+                <option key={a.id} value={a.id} disabled={a.loggedIn === false}>
+                  {a.label}
+                  {a.plan ? ` · ${a.plan}` : ''}
+                  {a.loggedIn === false ? ' (not logged in)' : a.usedPct !== undefined ? ` · ${Math.round(a.usedPct)}% used` : ''}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
         <label className="field">
           <span>Task</span>
           <textarea

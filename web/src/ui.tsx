@@ -2,6 +2,7 @@ import { memo, useCallback, useEffect, useMemo } from 'react';
 import type { AgentKind, AgentStatus, AgentSummary, Capacity, PermissionOption, PermissionRequest } from '../../shared/contract';
 import { api } from './api';
 import { getState, openAgent, setLaunchOpen, toast, upsertAgent, useNow, useStore } from './store';
+import { AlertControls, openAccounts, useAccounts } from './Accounts';
 
 export const KIND_LABEL: Record<AgentKind, string> = { devin: 'Devin', claude: 'Claude Code', codex: 'Codex' };
 const KIND_SHORT: Record<AgentKind, string> = { devin: 'Devin', claude: 'Claude', codex: 'Codex' };
@@ -93,17 +94,27 @@ export function PermissionButtons({ agent, req }: { agent: AgentSummary; req: Pe
 
 // ---------- top bar ----------
 function CapacityChip({ c }: { c: Capacity }) {
+  const accounts = useAccounts().filter((a) => a.kind === c.kind);
+  const logged = accounts.filter((a) => a.loggedIn).length;
+  const tip = c.detail ?? (c.available ? c.label : `${c.label} is not installed on this host`);
   return (
-    <div className={`cap ${c.available ? '' : 'cap-off'}`} title={c.detail ?? (c.available ? c.label : `${c.label} is not installed on this host`)}>
+    <button
+      className={`cap ${c.available ? '' : 'cap-off'}`}
+      title={tip}
+      aria-label={`${c.label}: ${logged} accounts, ${c.running} running`}
+      onClick={() => openAccounts(c.kind)}
+    >
       <span className={`cap-dot kind-dot-${c.kind}`} />
       <span className="cap-label">{c.label}</span>
+      {accounts.length > 0 && <span className="cap-sub">· {logged} {logged === 1 ? 'account' : 'accounts'} ·</span>}
       <span className="cap-num">{c.running}</span>
+      <span className="cap-sub cap-run">running</span>
       {c.usedPct !== undefined && (
         <span className="cap-bar">
           <span style={{ width: `${Math.min(100, Math.max(0, c.usedPct))}%` }} className={c.usedPct > 80 ? 'hot' : ''} />
         </span>
       )}
-    </div>
+    </button>
   );
 }
 
@@ -139,7 +150,11 @@ export function TopBar() {
         {capacity.map((c) => (
           <CapacityChip key={c.kind} c={c} />
         ))}
+        <button className="cap cap-all" onClick={() => openAccounts('all')}>
+          Accounts
+        </button>
       </div>
+      <AlertControls />
       <button className="btn btn-primary new-btn" onClick={() => setLaunchOpen(true)}>
         <span className="plus">+</span>
         <span className="new-label">New agent</span>
@@ -207,6 +222,9 @@ export function Inbox() {
 // ---------- card ----------
 export const AgentCard = memo(function AgentCard({ a, selected }: { a: AgentSummary; selected: boolean }) {
   const now = useNow();
+  const account = useAccounts().find((x) => x.id === a.accountId);
+  const queued = a.queued?.length ?? 0;
+  const ctx = a.usage && a.usage.size > 0 ? Math.min(100, (a.usage.used / a.usage.size) * 100) : undefined;
   const done = a.plan ? a.plan.filter((p) => p.status === 'completed').length : 0;
   return (
     <button className={`card card-${a.status} ${selected ? 'selected' : ''}`} onClick={() => openAgent(a.id)}>
@@ -222,7 +240,14 @@ export const AgentCard = memo(function AgentCard({ a, selected }: { a: AgentSumm
         <span title="Elapsed" className="elapsed">{ago(now - a.createdAt)}</span>
         <span className="sep elapsed">·</span>
         <span title="Last activity">active {ago(now - a.lastActivityAt)} ago</span>
+        {a.accountId && (
+          <>
+            <span className="sep">·</span>
+            <span className="card-acct" title="Account">{account?.label ?? a.accountId}</span>
+          </>
+        )}
         <span className="spacer" />
+        {queued > 0 && <span className="queued-badge">{queued} queued</span>}
         {a.toolCalls > 0 && (
           <span className="meta-chip" title="Tool calls">
             <ToolIcon /> {a.toolCalls}
@@ -237,6 +262,11 @@ export const AgentCard = memo(function AgentCard({ a, selected }: { a: AgentSumm
           </span>
         )}
       </div>
+      {ctx !== undefined && (
+        <span className="card-ctx" title={`Context ${Math.round(ctx)}% (${a.usage!.used.toLocaleString()} / ${a.usage!.size.toLocaleString()} tokens)`}>
+          <span style={{ width: `${ctx}%` }} className={ctx > 80 ? 'hot' : ''} />
+        </span>
+      )}
     </button>
   );
 });

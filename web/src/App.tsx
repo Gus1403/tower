@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react';
 import type { AgentStatus, AgentSummary } from '../../shared/contract';
+import { AccountsPanel, useAttentionAlerts } from './Accounts';
 import { NewAgentDialog } from './NewAgent';
 import { Panel } from './Panel';
 import { setLaunchOpen, useStore } from './store';
@@ -33,6 +34,7 @@ export function App() {
   const connected = useStore((s) => s.connected);
   const everConnected = useStore((s) => s.everConnected);
   const [tab, setTab] = useState<Col>('needs');
+  useAttentionAlerts();
   const [showObserved, setShowObserved] = useState(false);
 
   const { cols, observed, total } = useMemo(() => {
@@ -115,6 +117,7 @@ export function App() {
       </main>
       <Panel />
       <NewAgentDialog />
+      <AccountsPanel />
       <Toasts />
     </div>
   );
