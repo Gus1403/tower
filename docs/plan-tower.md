@@ -28,6 +28,7 @@ detection, and per-agent capacity. Runs on the owner's own server (eva-forge), r
 3. Web board: cards by status, Needs-you inbox, agent panel with live feed, launcher, phone layout. 🟩
 4. Host: Devin CLI + ACP adapters on eva-forge, real handshake probes, capacity probe, tmux read-only discovery. 🟩
 5. Integration on eva-forge, review, Playwright browser verification, README. 🟩 (live verify 19/19)
+6. Waves A–D (talk any time, controls, accounts + rotation, persistence, questions, attachments, tmux, notes, boards, send/handoff), Forja-grade redesign + dark mode, simplification per principles 4/11/13/14. 🟩 (server 39 tests; mock suites 34/25/39/85/27/7; live 43 + 56 + 48)
 
 ## Execution strategy
 
