@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import type { Account, AgentKind } from '../../shared/contract';
-import { toast, useStore } from './store';
+import type { Account, ActivityEntry, AgentKind } from '../../shared/contract';
+import { api } from './api';
+import { patchRotationLocal, toast, useNow, useRotation, useStore } from './store';
 import './accounts.css';
 
 export const ACCOUNT_KINDS: AgentKind[] = ['devin', 'claude', 'codex'];
@@ -66,19 +67,66 @@ function CmdBox({ cmd }: { cmd: string }) {
   );
 }
 
-function AccountRow({ a }: { a: Account }) {
-  const state = a.loggedIn === true ? 'on' : a.loggedIn === false ? 'off' : 'unknown';
+type AccStatus = NonNullable<Account['status']>;
+export function accountStatus(a: Account): AccStatus {
+  if (a.status) return a.status;
+  if (a.loggedIn === false) return 'logged_out';
+  if (a.excluded) return 'excluded';
+  return 'ok';
+}
+const ORDER: Record<AccStatus, number> = { ok: 0, exhausted: 1, excluded: 2, logged_out: 3 };
+function sortAccounts(list: Account[]): Account[] {
+  return [...list].sort((x, y) => {
+    const d = ORDER[accountStatus(x)] - ORDER[accountStatus(y)];
+    if (d) return d;
+    if (accountStatus(x) === 'exhausted') return (x.resetAt ?? Infinity) - (y.resetAt ?? Infinity);
+    return 0;
+  });
+}
+const STATUS_TEXT: Record<AccStatus, string> = { ok: 'Available', exhausted: 'At limit', excluded: 'Excluded', logged_out: 'Logged out' };
+
+function dur(ms: number): string {
+  const m = Math.max(1, Math.ceil(ms / 60000));
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  return m % 60 ? `${h}h ${m % 60}m` : `${h}h`;
+}
+function rel(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  if (s < 60) return 'just now';
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  return `${Math.floor(h / 24)}d ago`;
+}
+
+function AccountRow({ a, now }: { a: Account; now: number }) {
+  const st = accountStatus(a);
+  const [busy, setBusy] = useState(false);
+  const run = async (fn: () => Promise<unknown>, fail: string) => {
+    setBusy(true);
+    try {
+      await fn();
+    } catch (e) {
+      toast(`${fail}: ${(e as Error).message}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const excluded = !!a.excluded || st === 'excluded';
   return (
-    <div className={`acc-row acc-${state}`}>
+    <div className={`acc-row acc-st-${st}`} data-account={a.id}>
       <div className="acc-line">
-        <span className={`acc-dot acc-dot-${state}`} />
         <span className="acc-label">{a.label}</span>
         {a.plan && <span className="acc-plan">{a.plan}</span>}
         <span className="acc-spacer" />
-        {a.running > 0 && <span className="acc-running">{a.running} running</span>}
+        <span className={`acc-badge acc-badge-${st}`}>
+          <i />
+          {STATUS_TEXT[st]}
+        </span>
       </div>
-      {state !== 'on' && <div className="acc-state">{state === 'off' ? 'Not logged in' : 'Login state unknown'}</div>}
-      {a.usedPct !== undefined && (
+      {a.usedPct !== undefined && st !== 'logged_out' && (
         <div className="acc-usage" title={`${Math.round(a.usedPct)}% used`}>
           <span className="acc-bar">
             <span style={{ width: `${Math.min(100, Math.max(0, a.usedPct))}%` }} className={a.usedPct > 80 ? 'hot' : ''} />
@@ -86,15 +134,103 @@ function AccountRow({ a }: { a: Account }) {
           <span className="acc-pct">{Math.round(a.usedPct)}%</span>
         </div>
       )}
-      {a.detail && a.detail !== 'Not logged in' && <div className="acc-detail">{a.detail}</div>}
-      {state !== 'on' && <CmdBox cmd={a.loginCommand} />}
+      {st === 'logged_out' && <CmdBox cmd={a.loginCommand} />}
+      {(st !== 'logged_out' || excluded) && (
+      <div className="acc-foot">
+        <span className="acc-meta">
+          {st === 'exhausted' && a.resetAt !== undefined && (
+            <span className="acc-reset">{a.resetAt > now ? `back in ${dur(a.resetAt - now)}` : 'back any moment'}</span>
+          )}
+          {st === 'exhausted' && a.resetAt !== undefined && a.running > 0 && <span className="acc-sep">·</span>}
+          {a.running > 0 && <span className="acc-running">{a.running} running</span>}
+        </span>
+        <span className="acc-spacer" />
+        {st === 'exhausted' && (
+          <button className="acc-act" disabled={busy} onClick={() => void run(() => api.clearAccount(a.id), 'Could not clear')}>
+            Clear
+          </button>
+        )}
+        <button
+          className="acc-act"
+          disabled={busy}
+          onClick={() => void run(() => api.setExcluded(a.id, !excluded), excluded ? 'Could not include' : 'Could not exclude')}
+        >
+          {excluded ? 'Include' : 'Exclude'}
+        </button>
+      </div>
+      )}
     </div>
+  );
+}
+
+function Switch({ on, onChange, label }: { on: boolean; onChange: (v: boolean) => void; label: string }) {
+  return (
+    <button type="button" role="switch" aria-checked={on} aria-label={label} className={`acc-switch ${on ? 'on' : ''}`} onClick={() => onChange(!on)}>
+      <span />
+    </button>
+  );
+}
+
+function AutoRotate() {
+  const { autoRotate } = useRotation();
+  const set = async (on: boolean) => {
+    patchRotationLocal({ autoRotate: on });
+    try {
+      await api.setAutoRotate(on);
+    } catch (e) {
+      patchRotationLocal({ autoRotate: !on });
+      toast(`Could not change auto-rotate: ${(e as Error).message}`);
+    }
+  };
+  return (
+    <div className="acc-rotate">
+      <div className="acc-rotate-line">
+        <span className="acc-rotate-title">Auto-rotate</span>
+        <span className="acc-spacer" />
+        <Switch on={autoRotate} onChange={(v) => void set(v)} label="Auto-rotate" />
+      </div>
+      <div className="acc-rotate-help">When an account hits its limit, Tower moves the agent to the next available account.</div>
+    </div>
+  );
+}
+
+const ACT_ICON: Record<ActivityEntry['kind'], string> = {
+  limit_hit: '!',
+  moved: '→',
+  cleared: '✓',
+  excluded: '−',
+  included: '+',
+  no_account: '×',
+};
+
+function Activity({ entries, now }: { entries: ActivityEntry[]; now: number }) {
+  return (
+    <section className="acc-activity">
+      <div className="acc-group-head">Activity</div>
+      {entries.length === 0 ? (
+        <div className="acc-empty">No limit events yet</div>
+      ) : (
+        <ul className="acc-act-list">
+          {entries.slice(0, 50).map((e) => (
+            <li key={e.id} className={`acc-act-item act-${e.kind}`}>
+              <span className="acc-act-icon" aria-hidden="true">
+                {ACT_ICON[e.kind]}
+              </span>
+              <span className="acc-act-text">{e.text}</span>
+              <span className="acc-act-time">{rel(now - e.at)}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
 }
 
 export function AccountsPanel() {
   const f = useFilter();
   const accounts = useAccounts();
+  const rotation = useRotation();
+  const now = useNow();
   useEffect(() => {
     if (!f) return;
     const k = (e: KeyboardEvent) => e.key === 'Escape' && closeAccounts();
@@ -103,6 +239,8 @@ export function AccountsPanel() {
   }, [f]);
   if (!f) return null;
   const kinds = f === 'all' ? ACCOUNT_KINDS : [f];
+  const kindOf = new Map(accounts.map((a) => [a.id, a.kind]));
+  const activity = f === 'all' ? rotation.activity : rotation.activity.filter((e) => !e.accountId || !kindOf.has(e.accountId) || kindOf.get(e.accountId) === f);
   return (
     <div className="acc-scrim" onMouseDown={(e) => e.target === e.currentTarget && closeAccounts()}>
       <aside className="acc-panel" role="dialog" aria-label="Accounts">
@@ -120,18 +258,25 @@ export function AccountsPanel() {
           </button>
         </div>
         <div className="acc-body">
+          <AutoRotate />
           {kinds.map((k) => {
-            const list = accounts.filter((a) => a.kind === k);
+            const list = sortAccounts(accounts.filter((a) => a.kind === k));
+            const avail = list.filter((a) => accountStatus(a) === 'ok').length;
             return (
               <section key={k} className="acc-group">
                 <div className="acc-group-head">
                   <span className={`cap-dot kind-dot-${k}`} />
                   {KIND_NAME[k]}
-                  <span className="acc-count">{list.filter((a) => a.loggedIn).length}/{list.length}</span>
+                  <span className="acc-spacer" />
+                  {list.length > 0 && (
+                    <span className="acc-count">
+                      {avail} of {list.length} available
+                    </span>
+                  )}
                 </div>
                 {list.length === 0 && <div className="acc-empty">No accounts found</div>}
                 {list.map((a) => (
-                  <AccountRow key={a.id} a={a} />
+                  <AccountRow key={a.id} a={a} now={now} />
                 ))}
                 <details className="acc-add">
                   <summary>+ Add an account</summary>
@@ -141,6 +286,7 @@ export function AccountsPanel() {
               </section>
             );
           })}
+          <Activity entries={activity} now={now} />
         </div>
       </aside>
     </div>
