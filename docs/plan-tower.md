@@ -24,10 +24,10 @@ detection, and per-agent capacity. Runs on the owner's own server (eva-forge), r
 1. Contract (`shared/contract.ts`) — lead. 🟩 Plan review (Devin, 1 round): P0 client fs/terminal methods + auth,
    P0 stop ordering, P1 partial tool_call_update merge, ContentBlock text, unknown variants, URL logging — folded
    into the contract comments and the server brief. P2 DELETE endpoint and plan priority — deferred.
-2. Server: ACP agent manager, HTTP + WS API, stuck detection, tests. 🟨
-3. Web board: cards by status, Needs-you inbox, agent panel with live feed, launcher, phone layout. 🟨
-4. Host: Devin CLI + ACP adapters on eva-forge, real handshake probes, capacity probe, tmux read-only discovery. 🟨
-5. Integration on eva-forge, review, Playwright browser verification, README. 🟥
+2. Server: ACP agent manager, HTTP + WS API, stuck detection, tests. 🟩 (8 tests; review P0/P1 fixed)
+3. Web board: cards by status, Needs-you inbox, agent panel with live feed, launcher, phone layout. 🟩
+4. Host: Devin CLI + ACP adapters on eva-forge, real handshake probes, capacity probe, tmux read-only discovery. 🟩
+5. Integration on eva-forge, review, Playwright browser verification, README. 🟩 (live verify 19/19)
 
 ## Execution strategy
 
