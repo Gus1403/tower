@@ -1,9 +1,10 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { AgentKind } from '../../shared/contract';
 import { api } from './api';
-import { openAgent, setLaunchOpen, toast, upsertAgent, useStore } from './store';
+import { getState, openAgent, setLaunchOpen, toast, upsertAgent, useStore } from './store';
 import { KIND_LABEL } from './ui';
 import { useAccounts } from './Accounts';
+import { getActiveBoard } from './boards/activeBoard';
 
 const KINDS: AgentKind[] = ['devin', 'claude', 'codex'];
 
@@ -15,10 +16,22 @@ export function NewAgentDialog() {
   const [name, setName] = useState('');
   const [busy, setBusy] = useState(false);
   const [accountId, setAccountId] = useState('');
+  const boards = useStore((s) => s.boards);
+  const [board, setBoard] = useState('programs');
+  const [customer, setCustomer] = useState('');
+  const needCustomer = board === 'customers';
+  const custOk = !needCustomer || !!customer.trim();
   const accounts = useAccounts().filter((a) => a.kind === kind);
   const ta = useRef<HTMLTextAreaElement>(null);
 
   const avail = (k: AgentKind) => capacity.find((c) => c.kind === k)?.available ?? true;
+
+  // Wave D: board defaults to the active board each time the dialog opens
+  useLayoutEffect(() => {
+    if (!open) return;
+    const ab = getActiveBoard();
+    setBoard(getState().boards.some((b) => b.id === ab) ? ab : 'programs');
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -36,13 +49,21 @@ export function NewAgentDialog() {
   if (!open) return null;
 
   const submit = async () => {
-    if (!task.trim() || busy || !avail(kind)) return;
+    if (!task.trim() || busy || !avail(kind) || !custOk) return;
     setBusy(true);
     try {
-      const a = await api.launch({ kind, task: task.trim(), name: name.trim() || undefined, accountId: accountId || undefined });
+      const a = await api.launch({
+        kind,
+        task: task.trim(),
+        name: name.trim() || undefined,
+        accountId: accountId || undefined,
+        ...(board !== 'programs' ? { board } : {}),
+        ...(needCustomer && customer.trim() ? { customer: customer.trim() } : {}),
+      });
       upsertAgent(a);
       setTask('');
       setName('');
+      setCustomer('');
       setLaunchOpen(false);
       openAgent(a.id);
     } catch (e) {
@@ -80,6 +101,24 @@ export function NewAgentDialog() {
             </button>
           ))}
         </div>
+        {boards.length > 1 && (
+          <label className="field">
+            <span>Board</span>
+            <select value={board} onChange={(e) => setBoard(e.target.value)} aria-label="Board">
+              {boards.map((b) => (
+                <option key={b.id} value={b.id}>
+                  {b.name}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
+        {needCustomer && (
+          <label className="field">
+            <span>Customer</span>
+            <input value={customer} placeholder="e.g. cust-acme" aria-label="Customer" required onChange={(e) => setCustomer(e.target.value)} />
+          </label>
+        )}
         {accounts.length > 0 && (
           <label className="field">
             <span>Account</span>
@@ -119,7 +158,7 @@ export function NewAgentDialog() {
             <kbd>⌘</kbd>
             <kbd>Enter</kbd> to launch
           </span>
-          <button className="btn btn-primary" disabled={!task.trim() || busy || !avail(kind)} onClick={() => void submit()}>
+          <button className="btn btn-primary" disabled={!task.trim() || busy || !avail(kind) || !custOk} onClick={() => void submit()}>
             Launch
           </button>
         </div>

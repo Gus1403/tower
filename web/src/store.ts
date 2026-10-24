@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from 'react';
-import type { Account, AgentSummary, Capacity, FeedItem, Note, ServerEvent } from '../../shared/contract';
+import type { Account, AgentSummary, Board, Capacity, FeedItem, Note, RotationState, ServerEvent } from '../../shared/contract';
 
 export interface Toast {
   id: number;
@@ -11,6 +11,8 @@ export interface State {
   capacity: Capacity[];
   accounts: Account[];
   notes: Note[];
+  rotation: RotationState;
+  boards: Board[]; // Wave D
   host: string;
   feeds: Record<string, FeedItem[]>;
   feedLoaded: Record<string, boolean>;
@@ -21,11 +23,35 @@ export interface State {
   toasts: Toast[];
 }
 
+// Wave D: used until the server sends boards (contract defaults)
+export const DEFAULT_BOARDS: Board[] = [
+  {
+    id: 'programs',
+    name: 'Programs',
+    columns: [
+      { id: 'working', name: 'Working', statuses: ['starting', 'working', 'stuck'] },
+      { id: 'needs', name: 'Needs you', statuses: ['needs_you'] },
+      { id: 'done', name: 'Done', statuses: ['done', 'stopped', 'error'] },
+    ],
+  },
+  {
+    id: 'customers',
+    name: 'Customers',
+    columns: [
+      { id: 'handling', name: 'Handling', statuses: ['starting', 'working', 'needs_you', 'stuck'] },
+      { id: 'waiting', name: 'Waiting on the customer', statuses: ['done'] },
+      { id: 'asleep', name: 'Asleep', statuses: ['stopped', 'error'] },
+    ],
+  },
+];
+
 let state: State = {
   agents: {},
   capacity: [],
   accounts: [],
   notes: [],
+  rotation: { autoRotate: true, activity: [] },
+  boards: DEFAULT_BOARDS,
   host: '',
   feeds: {},
   feedLoaded: {},
@@ -76,7 +102,7 @@ export function applyEvent(ev: ServerEvent): void {
     case 'snapshot': {
       const agents: Record<string, AgentSummary> = {};
       for (const a of ev.state.agents) agents[a.id] = a;
-      setState((s) => ({ ...s, agents, capacity: ev.state.capacity, accounts: ev.state.accounts ?? [], notes: ev.state.notes ?? s.notes, host: ev.state.host }));
+      setState((s) => ({ ...s, agents, capacity: ev.state.capacity, accounts: ev.state.accounts ?? [], notes: ev.state.notes ?? s.notes, rotation: ev.state.rotation ?? s.rotation, boards: ev.state.boards?.length ? ev.state.boards : s.boards, host: ev.state.host }));
       return;
     }
     case 'agent':
@@ -100,6 +126,12 @@ export function applyEvent(ev: ServerEvent): void {
     case 'notes':
       setState((s) => ({ ...s, notes: ev.notes }));
       return;
+    case 'rotation':
+      setState((s) => ({ ...s, rotation: ev.rotation }));
+      return;
+    case 'boards':
+      setState((s) => ({ ...s, boards: ev.boards }));
+      return;
   }
 }
 
@@ -122,6 +154,15 @@ export function patchAgentLocal(id: string, p: Partial<AgentSummary>): void {
 export const selectAccounts = (s: State): Account[] => s.accounts;
 export function useAccounts(): Account[] {
   return useStore(selectAccounts);
+}
+
+export const selectRotation = (s: State): RotationState => s.rotation;
+export function useRotation(): RotationState {
+  return useStore(selectRotation);
+}
+/** Optimistically patch rotation (the next server 'rotation' event wins). */
+export function patchRotationLocal(p: Partial<RotationState>): void {
+  setState((s) => ({ ...s, rotation: { ...s.rotation, ...p } }));
 }
 
 export const selectNotes = (s: State): Note[] => s.notes;

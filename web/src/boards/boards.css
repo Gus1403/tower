@@ -1,0 +1,69 @@
+/* Wave D boards: only the shared theme variables (--bg --sf --bg2 --bg3 --bd --bd2 --tx --tx2 --tx3 --ac --am --rd --gr). */
+
+.wbd-tabs {
+  display: flex; align-items: center; gap: 2px; margin: 0 0 14px; padding: 0; overflow-x: auto;
+  scrollbar-width: none;
+}
+.wbd-tabs::-webkit-scrollbar { display: none; }
+.wbd-tab-wrap { position: relative; display: inline-flex; align-items: center; flex: none; }
+.wbd-tab {
+  display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border: 1px solid transparent;
+  border-radius: 7px; background: transparent; color: var(--tx2); font: inherit; font-size: 13px; font-weight: 500;
+  cursor: pointer; white-space: nowrap;
+}
+.wbd-tab:hover { background: var(--bg2); color: var(--tx); }
+.wbd-tab.on { background: var(--bg3); color: var(--tx); }
+.wbd-tab.drop-ok { border-color: var(--ac); border-style: dashed; background: var(--bg2); color: var(--tx); }
+.wbd-tab-n { font-size: 12px; color: var(--tx3); font-variant-numeric: tabular-nums; }
+.wbd-tab.on .wbd-tab-n { color: var(--tx2); }
+.wbd-tab-add { width: 28px; padding: 0; justify-content: center; color: var(--tx3); font-size: 16px; }
+.wbd-tab-more {
+  height: 24px; width: 22px; margin-left: -4px; border: 0; border-radius: 6px; background: transparent; color: var(--tx3);
+  cursor: pointer; font: inherit;
+}
+.wbd-tab-more:hover { background: var(--bg2); color: var(--tx); }
+.wbd-menu {
+  position: absolute; top: 32px; left: 0; z-index: 30; min-width: 170px; padding: 4px; background: var(--sf);
+  border: 1px solid var(--bd); border-radius: 9px; box-shadow: 0 8px 28px rgba(0, 0, 0, 0.14);
+}
+.wbd-menu button {
+  display: block; width: 100%; text-align: left; height: 30px; padding: 0 10px; border: 0; border-radius: 6px;
+  background: transparent; color: var(--rd); font: inherit; font-size: 13px; cursor: pointer;
+}
+.wbd-menu button:hover:not(:disabled) { background: var(--bg2); }
+.wbd-menu button:disabled { color: var(--tx3); cursor: not-allowed; }
+
+/* card extras (customer line, handoff line) */
+.wbd-card { position: relative; }
+.wbd-cust {
+  font-size: 11.5px; color: var(--tx3); padding: 0 2px 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  font-family: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, monospace;
+}
+.wbd-for {
+  display: block; max-width: 100%; margin: 3px 0 0; padding: 0 2px; border: 0; background: transparent; color: var(--tx3);
+  font: inherit; font-size: 11.5px; text-align: left; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.wbd-for:hover { color: var(--tx); text-decoration: underline; }
+
+/* panel links */
+.wbd-links {
+  display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; margin: 8px 0; background: var(--bg2);
+  border: 1px solid var(--bd); border-radius: 10px; font-size: 13px;
+}
+.wbd-links-row { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+.wbd-links-col { flex-direction: column; gap: 4px; }
+.wbd-links-k { color: var(--tx3); font-size: 12px; flex: none; min-width: 92px; }
+.wbd-links-v { color: var(--tx); }
+.wbd-mono { font-family: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, monospace; font-size: 12px; }
+.wbd-link {
+  border: 0; padding: 0; background: transparent; color: var(--tx); font: inherit; font-weight: 500; cursor: pointer;
+  text-decoration: underline; text-decoration-color: var(--bd2); text-underline-offset: 3px;
+}
+.wbd-link:hover:not(:disabled) { text-decoration-color: var(--tx); }
+.wbd-link:disabled { color: var(--tx3); cursor: default; text-decoration: none; }
+.wbd-hand-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.wbd-hand-list li { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+
+@media (max-width: 767px) {
+  .wbd-tabs { margin-bottom: 10px; }
+}

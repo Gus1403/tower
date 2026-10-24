@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { AgentStatus, AgentSummary, Note } from '../../shared/contract';
+import type { AgentStatus, AgentSummary, Board, Note } from '../../shared/contract';
 import { AccountsPanel, useAttentionAlerts } from './Accounts';
 import { ArchivedSection, BoardCard, DT_AGENT, DT_NOTE, matches, SearchBox } from './board/Board';
 import { mockMakeInteractive, useBoardNotes } from './board/api-extra';
@@ -12,6 +12,9 @@ import { Inbox, TopBar } from './ui';
 import { QuestionsInbox } from './Questions';
 import { initNotifications } from './notify';
 import { subscribe } from './store';
+import { BoardTabs } from './boards/BoardTabs';
+import { boardOf, useActiveBoard } from './boards/activeBoard';
+import { CardCustomer, CardRequestedBy } from './boards/Handoffs';
 
 initNotifications(
   () =>
@@ -21,16 +24,18 @@ initNotifications(
   subscribe,
 );
 
-type Col = 'working' | 'needs' | 'stuck' | 'done';
+type Col = string; // Board column id (Wave D)
 type Tab = Col | 'notes';
-const COLS: { key: Col; label: string; statuses: AgentStatus[] }[] = [
-  { key: 'working', label: 'Working', statuses: ['starting', 'working'] },
-  { key: 'needs', label: 'Needs you', statuses: ['needs_you'] },
-  { key: 'stuck', label: 'Stuck', statuses: ['stuck'] },
-  { key: 'done', label: 'Done', statuses: ['done', 'stopped', 'error'] },
-];
-const TAB_ORDER: Tab[] = ['needs', 'working', 'stuck', 'done', 'notes'];
-const TAB_LABEL: Record<Tab, string> = { needs: 'Needs you', working: 'Working', stuck: 'Stuck', done: 'Done', notes: 'Notes' };
+interface ColDef {
+  key: Col;
+  label: string;
+  statuses: AgentStatus[];
+  dot: 'working' | 'needs' | 'stuck' | 'done';
+}
+// colour/dot class of a board column, from its statuses (needs_you wins, then working, then done)
+const dotOf = (st: AgentStatus[]): ColDef['dot'] =>
+  st.includes('needs_you') && !st.includes('working') ? 'needs' : st.includes('working') || st.includes('starting') ? 'working' : st.includes('stuck') ? 'stuck' : 'done';
+const colsOf = (b: Board | undefined): ColDef[] => (b?.columns ?? []).map((c) => ({ key: c.id, label: c.name, statuses: c.statuses, dot: dotOf(c.statuses) }));
 
 function Toasts() {
   const toasts = useStore((s) => s.toasts);
@@ -49,7 +54,7 @@ const isTyping = (t: EventTarget | null) => {
   const el = t as HTMLElement | null;
   return !!el && (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT' || el.tagName === 'SELECT' || el.isContentEditable);
 };
-const agentMatch = (q: string, a: AgentSummary) => matches(q, a.name, a.task, a.lastMessage);
+const agentMatch = (q: string, a: AgentSummary) => matches(q, a.name, a.task, a.lastMessage, a.customer);
 const noteMatch = (q: string, n: Note) => matches(q, n.title, n.body);
 
 export function App() {
@@ -59,7 +64,19 @@ export function App() {
   const everConnected = useStore((s) => s.everConnected);
   const launchOpen = useStore((s) => s.launchOpen);
   const allNotes = useBoardNotes();
-  const [tab, setTab] = useState<Tab>('needs');
+  const boards = useStore((s) => s.boards);
+  const activeRaw = useActiveBoard();
+  const board = boards.find((b) => b.id === activeRaw) ?? boards.find((b) => b.id === 'programs') ?? boards[0];
+  const boardId = board?.id ?? 'programs';
+  const isPrograms = boardId === 'programs';
+  const COLS = useMemo(() => colsOf(board), [board]);
+  const TAB_ORDER: Tab[] = useMemo(() => {
+    const needs = COLS.filter((c) => c.dot === 'needs').map((c) => c.key);
+    const rest = COLS.filter((c) => c.dot !== 'needs').map((c) => c.key);
+    return [...needs, ...rest, ...(isPrograms ? ['notes'] : [])];
+  }, [COLS, isPrograms]);
+  const [tabRaw, setTab] = useState<Tab>('needs');
+  const tab: Tab = TAB_ORDER.includes(tabRaw) ? tabRaw : (TAB_ORDER[0] ?? 'notes');
   useAttentionAlerts();
   const [showObserved, setShowObserved] = useState(false);
   const [q, setQ] = useState('');
@@ -73,33 +90,35 @@ export function App() {
   // mock only: one observed tmux card is interactive so the live panel can be demoed
   useEffect(() => mockMakeInteractive(), [agents]);
 
-  const { cols, observed, archived, total } = useMemo(() => {
+  const { cols, observed, archived, total, counts } = useMemo(() => {
     const list = Object.values(agents);
     const live = list.filter((a) => !a.archived || a.source === 'tmux');
+    const counts: Record<string, number> = {};
+    for (const a of live) if (a.source !== 'tmux' && a.status !== 'observed') counts[boardOf(a)] = (counts[boardOf(a)] ?? 0) + 1;
+    const onBoard = live.filter((a) => a.source !== 'tmux' && boardOf(a) === boardId);
     const cols = {} as Record<Col, AgentSummary[]>;
     for (const c of COLS) {
-      cols[c.key] = live
-        .filter((a) => a.source !== 'tmux' && c.statuses.includes(a.status) && agentMatch(q, a))
-        .sort((a, b) => b.lastActivityAt - a.lastActivityAt);
+      cols[c.key] = onBoard.filter((a) => c.statuses.includes(a.status) && agentMatch(q, a)).sort((a, b) => b.lastActivityAt - a.lastActivityAt);
+      // keep finished columns stable: muted stopped/error after done
+      if (c.statuses.includes('done'))
+        cols[c.key].sort((a, b) => Number(a.status !== 'done') - Number(b.status !== 'done') || b.lastActivityAt - a.lastActivityAt);
     }
-    // keep Done stable: muted stopped/error after done
-    cols.done.sort((a, b) => Number(a.status !== 'done') - Number(b.status !== 'done') || b.lastActivityAt - a.lastActivityAt);
     const observedAll = live.filter((a) => a.source === 'tmux' || a.status === 'observed');
-    const observed = observedAll.filter((a) => agentMatch(q, a));
-    const archived = list.filter((a) => a.archived && a.source !== 'tmux' && agentMatch(q, a));
-    return { cols, observed, archived, total: list.length - observedAll.length };
-  }, [agents, q]);
+    const observed = isPrograms ? observedAll.filter((a) => agentMatch(q, a)) : [];
+    const archived = list.filter((a) => a.archived && a.source !== 'tmux' && boardOf(a) === boardId && agentMatch(q, a));
+    return { cols, observed, archived, total: list.length - observedAll.length, counts };
+  }, [agents, q, COLS, boardId, isPrograms]);
 
-  const notes = useMemo(() => allNotes.filter((n) => !n.archived && noteMatch(q, n)), [allNotes, q]);
-  const archivedNotes = useMemo(() => allNotes.filter((n) => n.archived && noteMatch(q, n)), [allNotes, q]);
+  const notes = useMemo(() => (isPrograms ? allNotes.filter((n) => !n.archived && noteMatch(q, n)) : []), [allNotes, q, isPrograms]);
+  const archivedNotes = useMemo(() => (isPrograms ? allNotes.filter((n) => n.archived && noteMatch(q, n)) : []), [allNotes, q, isPrograms]);
 
   // flat order for J/K: notes, then columns left→right, then observed (when expanded or searching)
   const order = useMemo(() => {
     const ids: string[] = notes.map((n) => `note:${n.id}`);
-    for (const c of COLS) for (const a of cols[c.key]) ids.push(a.id);
+    for (const c of COLS) for (const a of cols[c.key] ?? []) ids.push(a.id);
     if (showObserved || q) for (const a of observed) ids.push(a.id);
     return ids;
-  }, [notes, cols, observed, showObserved, q]);
+  }, [notes, cols, observed, showObserved, q, COLS]);
 
   const openItem = useCallback(
     (id: string) => {
@@ -162,9 +181,10 @@ export function App() {
   const open = openId ? agents[openId] : undefined;
   const tmuxOpen = open && open.source === 'tmux' && open.interactive;
 
+  const startCol = isPrograms ? COLS.find((c) => c.statuses.includes('working'))?.key : undefined;
   const colDrop = (c: Col) => ({
     onDragOver: (e: React.DragEvent) => {
-      if (c === 'working' && e.dataTransfer.types.includes(DT_NOTE)) {
+      if (c === startCol && e.dataTransfer.types.includes(DT_NOTE)) {
         e.preventDefault();
         setDropCol(c);
       }
@@ -175,7 +195,7 @@ export function App() {
       setDragKind(null);
       const id = e.dataTransfer.getData(DT_NOTE);
       const n = id && allNotes.find((x) => x.id === id);
-      if (c === 'working' && n) {
+      if (c === startCol && n) {
         e.preventDefault();
         setStarting(n);
       }
@@ -200,6 +220,7 @@ export function App() {
       )}
       <main className="main">
         <SearchBox ref={searchRefPhone} value={q} onChange={setQ} className="search-phone" />
+        <BoardTabs boards={boards} active={boardId} counts={counts} />
         <Inbox />
         <QuestionsInbox />
         {q && order.length === 0 && archived.length === 0 && <p className="search-empty">Nothing matches “{q}”.</p>}
@@ -212,31 +233,43 @@ export function App() {
           </div>
         ) : (
           <>
-            <nav className="tabs with-notes" role="tablist">
-              {TAB_ORDER.map((k) => (
-                <button key={k} role="tab" aria-selected={tab === k} className={`tab tab-${k} ${tab === k ? 'on' : ''}`} onClick={() => setTab(k)}>
-                  {TAB_LABEL[k]}
-                  <span className="tab-count">{k === 'notes' ? notes.length : cols[k].length}</span>
-                </button>
-              ))}
+            <nav className={`tabs ${isPrograms ? 'with-notes' : ''}`} role="tablist" style={{ gridTemplateColumns: `repeat(${TAB_ORDER.length}, 1fr)` }}>
+              {TAB_ORDER.map((k) => {
+                const c = COLS.find((x) => x.key === k);
+                return (
+                  <button key={k} role="tab" aria-selected={tab === k} className={`tab tab-${c ? c.dot : 'notes'} ${tab === k ? 'on' : ''}`} onClick={() => setTab(k)}>
+                    {c ? c.label : 'Notes'}
+                    <span className="tab-count">{k === 'notes' ? notes.length : (cols[k]?.length ?? 0)}</span>
+                  </button>
+                );
+              })}
             </nav>
-            <div className="board has-notes">
-              <NotesColumn notes={notes} focusId={focusId} onStart={setStarting} className={tab === 'notes' ? 'tab-on' : ''} />
+            <div
+              className={`board ${isPrograms ? 'has-notes' : ''}`}
+              data-board={boardId}
+              style={{ gridTemplateColumns: `repeat(${COLS.length + (isPrograms ? 1 : 0)}, minmax(0, 1fr))` }}
+            >
+              {isPrograms && <NotesColumn notes={notes} focusId={focusId} onStart={setStarting} className={tab === 'notes' ? 'tab-on' : ''} />}
               {COLS.map((c) => (
                 <section
                   key={c.key}
-                  className={`col col-${c.key} ${tab === c.key ? 'tab-on' : ''} ${dropCol === c.key ? 'drop-ok' : ''}`}
+                  data-col={c.key}
+                  className={`col col-${c.dot} col-id-${c.key} ${tab === c.key ? 'tab-on' : ''} ${dropCol === c.key ? 'drop-ok' : ''}`}
                   {...colDrop(c.key)}
                 >
                   <div className="col-head">
-                    <span className={`col-dot dot-${c.key}`} />
+                    <span className={`col-dot dot-${c.dot}`} />
                     {c.label}
                     <span className="col-count">{cols[c.key].length}</span>
                   </div>
                   <div className="col-body">
-                    {c.key === 'working' && dragKind === 'note' && <div className="archived-drop">Drop to start an agent</div>}
+                    {c.key === startCol && dragKind === 'note' && <div className="archived-drop">Drop to start an agent</div>}
                     {cols[c.key].map((a) => (
-                      <BoardCard key={a.id} a={a} selected={a.id === openId} focused={a.id === focusId} />
+                      <div key={a.id} className="wbd-card">
+                        <CardCustomer a={a} />
+                        <BoardCard a={a} selected={a.id === openId} focused={a.id === focusId} />
+                        <CardRequestedBy a={a} />
+                      </div>
                     ))}
                     {cols[c.key].length === 0 && <div className="col-empty">Nothing here</div>}
                   </div>

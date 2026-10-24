@@ -4,10 +4,13 @@ import type {
   AgentKind,
   ConfigOption,
   AgentSummary,
+  Board,
   Capacity,
   FeedItem,
   Note,
   PlanEntry,
+  ActivityEntry,
+  RotationState,
   ServerEvent,
 } from '../../shared/contract';
 import type { Transport } from './api';
@@ -53,15 +56,35 @@ export function mockTransport(): Transport {
   const accountsList: Account[] = [
     { id: 'claude-12', kind: 'claude', label: 'Claude · ~/.claude-12', home: '~/.claude-12', loggedIn: true, plan: 'max', usedPct: 42, detail: '5h window 42% used', running: 0, loginCommand: 'CLAUDE_CONFIG_DIR=~/.claude-12 claude /login' },
     { id: 'claude-3', kind: 'claude', label: 'Claude · ~/.claude-3', home: '~/.claude-3', loggedIn: true, plan: 'max', usedPct: 9, detail: '5h window 9% used', running: 0, loginCommand: 'CLAUDE_CONFIG_DIR=~/.claude-3 claude /login' },
+    { id: 'claude-5', kind: 'claude', label: 'Claude · ~/.claude-5', home: '~/.claude-5', loggedIn: null, plan: 'max', usedPct: 100, detail: '5h window 100% used', running: 0, loginCommand: 'CLAUDE_CONFIG_DIR=~/.claude-5 claude /login', status: 'exhausted', resetAt: T + 40 * 60_000 },
     { id: 'claude-7', kind: 'claude', label: 'Claude · ~/.claude-7', home: '~/.claude-7', loggedIn: false, running: 0, detail: 'Not logged in', loginCommand: 'CLAUDE_CONFIG_DIR=~/.claude-7 claude /login' },
     { id: 'codex', kind: 'codex', label: 'Codex · ~/.codex', loggedIn: true, plan: 'pro', usedPct: 18, detail: 'Weekly limit 18% used', running: 0, loginCommand: 'codex login' },
+    { id: 'codex-2', kind: 'codex', label: 'Codex · ~/.codex-2', home: '~/.codex-2', loggedIn: true, plan: 'plus', usedPct: 61, detail: 'Weekly limit 61% used', running: 0, loginCommand: 'CODEX_HOME=~/.codex-2 codex login', excluded: true },
     { id: 'devin', kind: 'devin', label: 'Devin', loggedIn: true, plan: 'Devin Max', running: 0, loginCommand: 'devin auth login' },
   ];
+  const statusOf = (a: Account): NonNullable<Account['status']> =>
+    a.loggedIn === false ? 'logged_out' : a.excluded ? 'excluded' : a.status === 'exhausted' ? 'exhausted' : 'ok';
   const accounts = (): Account[] =>
     accountsList.map((acc) => ({
       ...acc,
+      status: statusOf(acc),
       running: [...agents.values()].filter((a) => a.accountId === acc.id && a.status !== 'stopped' && a.status !== 'error').length,
     }));
+  const rotation: RotationState = {
+    autoRotate: true,
+    activity: [
+      { id: 'act-4', at: T - 3 * 60_000, kind: 'moved', accountId: 'claude-5', toAccountId: 'claude-3', agentId: 'c9p0', newAgentId: 'c9p4', text: 'Moved fix-tests to Claude · ~/.claude-3' },
+      { id: 'act-3', at: T - 3 * 60_000 - 4000, kind: 'limit_hit', accountId: 'claude-5', text: 'Claude · ~/.claude-5 hit its limit' },
+      { id: 'act-2', at: T - 52 * 60_000, kind: 'no_account', accountId: 'codex', text: 'No Codex account available; kept the agent waiting' },
+      { id: 'act-1', at: T - 3 * 3600_000, kind: 'cleared', accountId: 'claude-12', text: 'Claude · ~/.claude-12 is available again' },
+    ],
+  };
+  const emitRotation = () => emit({ type: 'rotation', rotation: { ...rotation, activity: rotation.activity.map((x) => ({ ...x })) } });
+  const logActivity = (e: Omit<ActivityEntry, 'id' | 'at'>) => {
+    rotation.activity.unshift({ ...e, id: uid('act'), at: Date.now() });
+    rotation.activity.splice(200);
+    emitRotation();
+  };
   const MODES: Record<AgentKind, { id: string; name: string }[]> = {
     claude: [{ id: 'default', name: 'Default' }, { id: 'acceptEdits', name: 'Accept edits' }, { id: 'plan', name: 'Plan mode' }, { id: 'bypassPermissions', name: 'Bypass permissions' }],
     codex: [{ id: 'read-only', name: 'Read only' }, { id: 'auto', name: 'Auto' }, { id: 'full-access', name: 'Full access' }],
@@ -107,6 +130,14 @@ export function mockTransport(): Transport {
   const put = (a: AgentSummary) => {
     agents.set(a.id, a);
     emit({ type: 'agent', agent: a });
+    // Wave D: keep the requester's handoffs list current
+    const r = a.requestedBy && agents.get(a.requestedBy.agentId);
+    const h = r && r.handoffs?.find((x) => x.agentId === a.id);
+    if (r && h && h.status !== a.status) {
+      const nr = { ...r, handoffs: r.handoffs!.map((x) => (x.agentId === a.id ? { ...x, status: a.status } : x)) };
+      agents.set(nr.id, nr);
+      emit({ type: 'agent', agent: nr });
+    }
   };
   const patch = (id: string, p: Partial<AgentSummary>) => {
     const a = agents.get(id);
@@ -216,6 +247,8 @@ export function mockTransport(): Transport {
 
   const a3 = mkAgent('c9p4', 'claude', 'fix-tests', 'Fix the flaky websocket reconnect test in server/test', 'needs_you', 1630, {
     toolCalls: 11,
+    accountId: 'claude-3',
+    movedFrom: { agentId: 'c9p0', accountId: 'claude-5' },
     questions: [
       {
         id: 'q-flake',
@@ -297,6 +330,65 @@ export function mockTransport(): Transport {
   const emitNotes = () => emit({ type: 'notes', notes: notes.map((n) => ({ ...n })) });
   const uploads = new Map<string, string>();
   [a1, a2, a3, a4, a5, a6, o1, o2].forEach((a) => agents.set(a.id, a));
+  // ---------- Wave D: boards + customer sessions + one handoff ----------
+  const boards: Board[] = [
+    {
+      id: 'programs',
+      name: 'Programs',
+      columns: [
+        { id: 'working', name: 'Working', statuses: ['starting', 'working', 'stuck'] },
+        { id: 'needs', name: 'Needs you', statuses: ['needs_you'] },
+        { id: 'done', name: 'Done', statuses: ['done', 'stopped', 'error'] },
+      ],
+    },
+    {
+      id: 'customers',
+      name: 'Customers',
+      columns: [
+        { id: 'handling', name: 'Handling', statuses: ['starting', 'working', 'needs_you', 'stuck'] },
+        { id: 'waiting', name: 'Waiting on the customer', statuses: ['done'] },
+        { id: 'asleep', name: 'Asleep', statuses: ['stopped', 'error'] },
+      ],
+    },
+  ];
+  const emitBoards = () => emit({ type: 'boards', boards: boards.map((b) => ({ ...b, columns: b.columns.map((c) => ({ ...c })) })) });
+  const cAcme = mkAgent('k1a2', 'claude', 'acme-onboarding', 'Own the Acme Corp account: answer their WhatsApp questions and get their export working', 'needs_you', 2900, {
+    board: 'customers',
+    customer: 'cust-acme',
+    toolCalls: 7,
+    lastMessage: 'Acme says the CSV export drops accents. I opened a program session to fix it.',
+    handoffs: [{ agentId: 'g4h2', name: 'csv-export-accents', status: 'working' }],
+  });
+  const cDelta = mkAgent('k2d7', 'claude', 'delta-pricing', 'Delta Foods: explain the Pro plan and send the quote', 'done', 5200, {
+    board: 'customers',
+    customer: 'cust-delta',
+    stopReason: 'end_turn',
+    lastMessage: 'Sent the quote; waiting for Delta to reply.',
+  });
+  const cLumen = mkAgent('k3l5', 'codex', 'lumen-import', 'Lumen Studio: import their 3,000 contacts and confirm the count', 'working', 640, {
+    board: 'customers',
+    customer: 'cust-lumen',
+    toolCalls: 3,
+    plan: plan(['Read their CSV', 'Map columns', 'Import', 'Confirm with Lumen'], 2),
+    lastMessage: 'Imported 2,140 of 3,000 contacts…',
+  });
+  const cPrisma = mkAgent('k4p9', 'devin', 'prisma-followup', 'Prisma Dental: follow up on the demo next week', 'stopped', 86_400, {
+    board: 'customers',
+    customer: 'cust-prisma',
+    stopReason: 'cancelled',
+    lastMessage: 'Asleep until Monday 9:00.',
+  });
+  const hFix = mkAgent('g4h2', 'claude', 'csv-export-accents', 'Fix the CSV export so accented names (José, Peña) survive: write UTF-8 with BOM', 'working', 300, {
+    board: 'programs',
+    requestedBy: { agentId: 'k1a2', name: 'acme-onboarding' },
+    toolCalls: 2,
+    plan: plan(['Reproduce with José Peña', 'Write UTF-8 with BOM', 'Add a test', 'Report back'], 1),
+    lastMessage: 'Reproduced: the export is written as latin1.',
+  });
+  [cAcme, cDelta, cLumen, cPrisma, hFix].forEach((a) => {
+    agents.set(a.id, a);
+    seedHistory(a.id, a.task, [{ type: 'agent_message', text: a.lastMessage ?? '' }], Math.min(3600, (T - a.createdAt) / 1000));
+  });
   for (const o of [o1, o2]) feed(o.id, { type: 'status', id: uid('st'), at: o.createdAt, text: 'Observed from tmux (read-only)' }, true);
 
   // ---------- scripts ----------
@@ -474,6 +566,8 @@ export function mockTransport(): Transport {
       model: req.model,
       ...defaults(req.kind),
       accountId: req.accountId && req.accountId !== 'auto' ? req.accountId : ACC[req.kind],
+      ...(req.board ? { board: req.board } : {}),
+      ...(req.customer ? { customer: req.customer } : {}),
     };
     put(a);
     emit({ type: 'capacity', capacity: capacity() });
@@ -497,7 +591,7 @@ export function mockTransport(): Transport {
       emit = onEvent;
       setTimeout(() => {
         onStatus(true);
-        onEvent({ type: 'snapshot', state: { agents: [...agents.values()], capacity: capacity(), accounts: accounts(), notes: notes.map((n) => ({ ...n })), host: 'eva-forge' } });
+        onEvent({ type: 'snapshot', state: { agents: [...agents.values()], capacity: capacity(), accounts: accounts(), notes: notes.map((n) => ({ ...n })), rotation: { ...rotation, activity: rotation.activity.map((x) => ({ ...x })) }, boards: boards.map((b) => ({ ...b })), host: 'eva-forge' } });
         setInterval(tick, 650);
       }, 0);
     },
@@ -636,6 +730,31 @@ export function mockTransport(): Transport {
     accounts() {
       return delay(accounts(), 80);
     },
+    clearAccount(id) {
+      const acc = accountsList.find((x) => x.id === id);
+      if (!acc) return fail('No such account');
+      if (statusOf(acc) !== 'exhausted') return fail('Account is not at its limit');
+      acc.status = 'ok';
+      acc.resetAt = undefined;
+      acc.usedPct = 0;
+      acc.detail = '5h window 0% used';
+      emit({ type: 'accounts', accounts: accounts() });
+      logActivity({ kind: 'cleared', accountId: id, text: `${acc.label} is available again` });
+      return delay(undefined, 90);
+    },
+    setExcluded(id, excluded) {
+      const acc = accountsList.find((x) => x.id === id);
+      if (!acc) return fail('No such account');
+      acc.excluded = excluded;
+      emit({ type: 'accounts', accounts: accounts() });
+      logActivity({ kind: excluded ? 'excluded' : 'included', accountId: id, text: `${acc.label} ${excluded ? 'excluded from rotation' : 'back in rotation'}` });
+      return delay(undefined, 90);
+    },
+    setAutoRotate(on) {
+      rotation.autoRotate = on;
+      emitRotation();
+      return delay({ ...rotation, activity: rotation.activity.map((x) => ({ ...x })) }, 90);
+    },
     permission(id, requestId, optionId) {
       const a = agents.get(id);
       const p = a?.pendingPermission;
@@ -659,6 +778,34 @@ export function mockTransport(): Transport {
       feed(id, { type: 'status', id: uid('st'), at: Date.now(), text: 'Stopped' });
       patch(id, { status: 'stopped', pendingPermission: undefined, stopReason: 'cancelled' });
       emit({ type: 'capacity', capacity: capacity() });
+      return delay(undefined, 90);
+    },
+    // ---- Wave D ----
+    createBoard(name) {
+      const n = name.trim();
+      if (!n) return fail('Name is required');
+      const base = n.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'board';
+      let id = base;
+      for (let i = 2; boards.some((b) => b.id === id); i++) id = `${base}-${i}`;
+      const b: Board = { id, name: n, columns: boards[0].columns.map((c) => ({ ...c })) };
+      boards.push(b);
+      emitBoards();
+      return delay({ ...b }, 90);
+    },
+    deleteBoard(id) {
+      if (id === 'programs' || id === 'customers') return fail('Default boards cannot be deleted');
+      const i = boards.findIndex((b) => b.id === id);
+      if (i === -1) return fail('No such board');
+      if ([...agents.values()].some((a) => (a.board ?? 'programs') === id && !a.archived)) return fail('Board is not empty');
+      boards.splice(i, 1);
+      emitBoards();
+      return delay(undefined, 90);
+    },
+    setBoard(id, board, customer) {
+      const a = agents.get(id);
+      if (!a) return fail('No such agent');
+      if (!boards.some((b) => b.id === board)) return fail('No such board');
+      put({ ...a, board, ...(customer ? { customer } : {}) });
       return delay(undefined, 90);
     },
   };

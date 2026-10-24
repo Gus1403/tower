@@ -1,4 +1,4 @@
-import type { Account, AgentKind, AgentSummary, FeedItem, LaunchRequest, Note, ServerEvent } from '../../shared/contract';
+import type { Account, AgentKind, AgentSummary, Board, FeedItem, LaunchRequest, Note, RotationState, ServerEvent } from '../../shared/contract';
 import { applyEvent, getState, setFetchedFeed, setState } from './store';
 
 export interface Upload {
@@ -26,8 +26,15 @@ export interface Transport {
   resume(id: string): Promise<void>;
   remove(id: string): Promise<void>;
   accounts(): Promise<Account[]>;
+  clearAccount(id: string): Promise<void>;
+  setExcluded(id: string, excluded: boolean): Promise<void>;
+  setAutoRotate(on: boolean): Promise<RotationState>;
   permission(id: string, requestId: string, optionId: string): Promise<void>;
   stop(id: string): Promise<void>;
+  // Wave D
+  createBoard(name: string): Promise<Board>;
+  deleteBoard(id: string): Promise<void>;
+  setBoard(id: string, board: string, customer?: string): Promise<void>;
   connect(onEvent: (ev: ServerEvent) => void, onStatus: (connected: boolean) => void): void;
 }
 
@@ -96,9 +103,16 @@ function realTransport(): Transport {
     resume: (id) => req<void>('POST', `/api/agents/${encodeURIComponent(id)}/resume`),
     remove: (id) => req<void>('DELETE', `/api/agents/${encodeURIComponent(id)}`),
     accounts: () => req<Account[]>('GET', '/api/accounts'),
+    clearAccount: (id) => req<void>('POST', `/api/accounts/${encodeURIComponent(id)}/clear`),
+    setExcluded: (id, excluded) => req<void>('POST', `/api/accounts/${encodeURIComponent(id)}/exclude`, { excluded }),
+    setAutoRotate: (on) => req<RotationState>('POST', '/api/rotation', { autoRotate: on }),
     permission: (id, requestId, optionId) =>
       req<void>('POST', `/api/agents/${encodeURIComponent(id)}/permission`, { requestId, optionId }),
     stop: (id) => req<void>('POST', `/api/agents/${encodeURIComponent(id)}/stop`),
+    createBoard: (name) => req<Board>('POST', '/api/boards', { name }),
+    deleteBoard: (id) => req<void>('DELETE', `/api/boards/${encodeURIComponent(id)}`),
+    setBoard: (id, board, customer) =>
+      req<void>('POST', `/api/agents/${encodeURIComponent(id)}/board`, customer ? { board, customer } : { board }),
     connect(onEvent, onStatus) {
       let attempt = 0;
       const open = () => {
@@ -190,6 +204,12 @@ export const api = {
   resume: (id: string) => transport.resume(id),
   remove: (id: string) => transport.remove(id),
   accounts: () => transport.accounts(),
+  clearAccount: (id: string) => transport.clearAccount(id),
+  setExcluded: (id: string, excluded: boolean) => transport.setExcluded(id, excluded),
+  setAutoRotate: (on: boolean) => transport.setAutoRotate(on),
   permission: (id: string, requestId: string, optionId: string) => transport.permission(id, requestId, optionId),
   stop: (id: string) => transport.stop(id),
+  createBoard: (name: string) => transport.createBoard(name),
+  deleteBoard: (id: string) => transport.deleteBoard(id),
+  setBoard: (id: string, board: string, customer?: string) => transport.setBoard(id, board, customer),
 };
