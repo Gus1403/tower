@@ -1,0 +1,92 @@
+#!/usr/bin/env node
+// tower — agent-side CLI. `tower ask [--recommendation "…"] "question"` asks the owner through Tower's unix socket.
+// Env: TOWER_AGENT_ID (this agent's id) and TOWER_SOCKET (path of <data dir>/agent.sock), both set by the server.
+import net from 'node:net';
+
+const HELP = `Usage:
+  tower ask [--recommendation "your recommended answer"] "question text"
+      Ask the owner a question in Tower. The answer arrives as your next message.
+  tower help
+      Show this help.
+
+Environment (set by Tower for every agent it launches):
+  TOWER_AGENT_ID   id of this agent
+  TOWER_SOCKET     path of Tower's agent socket`;
+
+const argv = process.argv.slice(2);
+const cmd = argv[0];
+
+if (!cmd || cmd === 'help' || cmd === '--help' || cmd === '-h') {
+  console.log(HELP);
+  process.exit(cmd ? 0 : 2);
+}
+
+if (cmd !== 'ask') {
+  console.error(`tower: unknown command "${cmd}"\n\n${HELP}`);
+  process.exit(2);
+}
+
+let recommendation;
+const parts = [];
+for (let i = 1; i < argv.length; i++) {
+  const a = argv[i];
+  if (a === '--recommendation' || a === '-r') {
+    recommendation = argv[++i];
+    if (recommendation === undefined) {
+      console.error('tower: --recommendation needs a value');
+      process.exit(2);
+    }
+  } else if (a.startsWith('--recommendation=')) {
+    recommendation = a.slice('--recommendation='.length);
+  } else {
+    parts.push(a);
+  }
+}
+const text = parts.join(' ').trim();
+if (!text) {
+  console.error('tower: missing question text\n\n' + HELP);
+  process.exit(2);
+}
+const agentId = process.env.TOWER_AGENT_ID;
+const sock = process.env.TOWER_SOCKET;
+if (!agentId || !sock) {
+  console.error('tower: TOWER_AGENT_ID and TOWER_SOCKET must be set (they are set by Tower for agents it launches)');
+  process.exit(2);
+}
+
+const req = { cmd: 'ask', agentId, text };
+if (recommendation && recommendation.trim()) req.recommendation = recommendation;
+
+const conn = net.createConnection(sock);
+let buf = '';
+const timer = setTimeout(() => {
+  console.error('tower: no reply from Tower (timeout)');
+  process.exit(1);
+}, 10000);
+conn.setEncoding('utf8');
+conn.on('connect', () => conn.write(JSON.stringify(req) + '\n'));
+conn.on('data', (c) => {
+  buf += c;
+  const nl = buf.indexOf('\n');
+  if (nl < 0) return;
+  clearTimeout(timer);
+  let reply;
+  try {
+    reply = JSON.parse(buf.slice(0, nl));
+  } catch {
+    console.error('tower: invalid reply from Tower');
+    process.exit(1);
+  }
+  conn.end();
+  if (reply && reply.ok) {
+    console.log('Asked. The owner will answer in Tower; the answer arrives as your next message.');
+    process.exit(0);
+  }
+  console.error(`tower: ask failed: ${(reply && reply.error) || 'unknown error'}`);
+  process.exit(1);
+});
+conn.on('error', (e) => {
+  clearTimeout(timer);
+  console.error(`tower: cannot reach Tower at ${sock}: ${e.message}`);
+  process.exit(1);
+});
