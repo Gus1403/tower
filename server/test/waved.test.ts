@@ -396,7 +396,7 @@ test('fleet uses exact Forja session identity, full work and semantic board stat
       { id: 'customer-board', name: 'Clientes', customers: true, groups: ['you', 'working', 'rest'] },
     ],
     cards: [
-      { session: 'shell-123', title: 'SEO diario', board: 'routine-board', column: 0, work },
+      { session: 'shell-123', title: 'SEO diario', model: 'claude-opus-5-5', board: 'routine-board', column: 0, work },
       { session: 'cust-opaque-id', title: 'Customer with a different title', board: 'customer-board', column: 1, work: 'Running a task' },
       { session: 'shell-between-turns', title: 'Known session at a shell', board: 'routine-board', column: 2, agent: 'claude' },
       { session: 'not-running', title: 'Sleeping customer', board: 'customer-board', column: 2 },
@@ -419,6 +419,7 @@ test('fleet uses exact Forja session identity, full work and semantic board stat
     assert.equal(state.agents.length, 3, 'include known live shells, not absent processes or unrelated shells');
     assert.equal(state.agents.find(a => a.name === 'Known session at a shell')?.board, 'routines');
     assert.equal(routine.name, 'SEO diario');
+    assert.equal(routine.model, 'claude-opus-5-5');
     assert.equal(routine.board, 'routines');
     assert.equal(routine.status, 'needs_you');
     assert.equal(routine.task, work);

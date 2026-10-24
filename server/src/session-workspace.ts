@@ -4,6 +4,7 @@ import path from 'node:path';
 import { readFile } from 'node:fs/promises';
 import type { AgentManager } from './agents.js';
 import { tmuxAllowed } from './tmux-control.js';
+import { readLocalHistory } from './local-history.js';
 import type { FeedItem, SessionWorkspace } from '../../shared/contract.js';
 
 const PAGE = 60;
@@ -31,7 +32,16 @@ function safeUrl(value: unknown): string | undefined {
   } catch { return undefined; }
 }
 
-function cardContext(card: Card): SessionWorkspace['context'] {
+function cardContext(card: Card, publicOrigin?: string): SessionWorkspace['context'] {
+  const linkedUrl = (value: unknown): string | undefined => {
+    const direct = safeUrl(value);
+    if (direct) return direct;
+    if (!publicOrigin || typeof value !== 'string' || !path.isAbsolute(value) || typeof card.id !== 'string') return undefined;
+    if (!Array.isArray(card.links) || !card.links.some(link => link && typeof link === 'object' && link.url === value)) return undefined;
+    const url = new URL(`/api/cards/${encodeURIComponent(card.id)}/file`, publicOrigin);
+    url.searchParams.set('path', value);
+    return url.href;
+  };
   const work = text(card.work);
   const summary = text(card.summary);
   const questions = Array.isArray(card.questions) ? card.questions : [];
@@ -45,10 +55,10 @@ function cardContext(card: Card): SessionWorkspace['context'] {
   const links = Array.isArray(card.links) ? card.links.slice(0, 40).flatMap(link => {
     if (!link || typeof link !== 'object') return [];
     const row = link as Record<string, unknown>;
-    const url = safeUrl(row.url);
+    const url = linkedUrl(row.url);
     return url ? [{ title: text(row.title, 200) ?? url, url }] : [];
   }) : [];
-  const result = delivery && safeUrl(delivery.result);
+  const result = delivery && linkedUrl(delivery.result);
   const deliveryText = delivery && [text(delivery.reason, 4000), !result && text(delivery.result, 2000)].filter(Boolean).join('\n');
   return {
     ...(work || summary ? { summary: work && summary && work !== summary ? `${work}\n\n${summary}` : work ?? summary } : {}),
@@ -176,12 +186,33 @@ export async function sessionWorkspace(manager: Manager, id: string, before?: st
     if (matches.length === 1) card = matches[0];
   } catch { return { code: 200, body: unavailable('Forja board unavailable') }; }
   if (!card || card.agent !== agent.kind || typeof card.id !== 'string' || typeof card.sessionId !== 'string') return { code: 200, body: unavailable('No matching Forja session') };
-  const context = cardContext(card);
-  if (agent.kind !== 'claude' || card.conversation !== true) return { code: 200, body: unavailable('History unavailable for this session', context) };
+  let publicOrigin: string | undefined;
+  try {
+    const config = JSON.parse(await readFile(process.env.TOWER_FORJA_CONFIG ?? path.join(os.homedir(), '.config', 'forja', 'config.json'), 'utf8')) as Config;
+    const candidate = config.publicUrl && new URL(config.publicUrl);
+    if (candidate && candidate.protocol === 'https:' && !candidate.username && !candidate.password && candidate.pathname === '/' && !candidate.search && !candidate.hash) publicOrigin = candidate.origin;
+  } catch { /* web links remain available without a public file origin */ }
+  const context = cardContext(card, publicOrigin);
+  if (agent.kind !== 'claude') return { code: 200, body: unavailable('History unavailable for this session', context) };
+  const localPage = async (): Promise<SessionWorkspace> => {
+    const conversation = await readLocalHistory(session, before?.startsWith('lh_') ? before.slice(3) : undefined);
+    if (conversation.before) conversation.before = `lh_${conversation.before}`;
+    return { conversation, context };
+  };
+  if (before?.startsWith('lh_') || card.conversation !== true) {
+    if (before && !before.startsWith('lh_')) return { code: 400, body: { error: 'history cursor is stale; reload the conversation' } };
+    const body = await localPage();
+    if (before && !body.conversation.available) return { code: 409, body: { error: body.conversation.reason ?? 'history unavailable' } };
+    return { code: 200, body };
+  }
   try {
     const page = await conversationPage(card, before);
     const items: FeedItem[] = [];
     for (const event of page.events) { const item = mapEvent(event); if (item) items.push(item); }
     return { code: 200, body: { conversation: { available: true, items, hasMore: !!page.before, ...(page.before ? { before: page.before } : {}) }, context } };
-  } catch { return { code: 200, body: unavailable('History temporarily unavailable', context) }; }
+  } catch {
+    if (before) return { code: 409, body: { error: 'History changed or is temporarily unavailable; reload the conversation' } };
+    const local = await localPage();
+    return { code: 200, body: local.conversation.available ? local : unavailable('History temporarily unavailable', context) };
+  }
 }

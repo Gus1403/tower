@@ -1388,6 +1388,7 @@ export class AgentManager extends EventEmitter {
         name: redact ? `${label} session ${this.tmuxNums.get(sess)}` : (f?.name ?? sess),
         task: redact ? 'Existing tmux session' : f?.work || f?.name || sess,
         cwd: '',
+        model: f?.model,
         source: 'tmux',
         status: f?.status ?? 'observed',
         board,
@@ -1415,12 +1416,12 @@ export class AgentManager extends EventEmitter {
 
   // Read the same structured board response as the Forja CLI. Its printed TSV drops
   // session identity and truncates work; display-title slugs cannot identify sessions.
-  private async readForjaBoard(sessions: Set<string>): Promise<Map<string, { board: string; status: AgentStatus; name: string; work: string; kind?: AgentKind }>> {
-    const out = new Map<string, { board: string; status: AgentStatus; name: string; work: string; kind?: AgentKind }>();
+  private async readForjaBoard(sessions: Set<string>): Promise<Map<string, { board: string; status: AgentStatus; name: string; work: string; kind?: AgentKind; model?: string }>> {
+    const out = new Map<string, { board: string; status: AgentStatus; name: string; work: string; kind?: AgentKind; model?: string }>();
     if (process.env.TOWER_FORJA === '0') return out;
     const socketPath = process.env.FORJA_AGENT_SOCKET ?? path.join(os.homedir(), '.local', 'state', 'forja', 'agent.sock');
     type BoardView = { id: string; customers?: boolean; routines?: boolean; groups: string[] };
-    type CardView = { session?: string; title?: string; board: string; column: number; work?: string; agent?: string };
+    type CardView = { session?: string; title?: string; board: string; column: number; work?: string; agent?: string; model?: string };
     try {
       const response = await new Promise<string>((resolve, reject) => {
         const socket = net.createConnection(socketPath);
@@ -1451,6 +1452,7 @@ export class AgentManager extends EventEmitter {
           board: source.routines ? 'routines' : source.customers ? 'customers' : 'programs',
           status,
           kind: KIND_LABEL[card.agent as AgentKind] ? card.agent as AgentKind : undefined,
+          model: typeof card.model === 'string' && card.model.trim() ? card.model.trim().slice(0, 120) : undefined,
           name: typeof card.title === 'string' && card.title.trim() ? card.title : card.session,
           work: typeof card.work === 'string' ? card.work.trim() : '',
         });

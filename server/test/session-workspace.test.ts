@@ -49,7 +49,7 @@ function card(session: string, agent = 'claude', conversation = true) {
     work: `Full work for ${session}`, summary: `Summary for ${session}`,
     questions: [{ text: `Question for ${session}`, recommendation: 'Proceed' }],
     delivery: { reason: `Delivered ${session}`, result: 'https://example.com/result', at: '2026-10-24T12:00:00Z' },
-    links: [{ title: 'Evidence', url: 'https://example.com/evidence' }, { title: 'Unsafe', url: 'javascript:alert(1)' }],
+    links: [{ title: 'Evidence', url: 'https://example.com/evidence' }, { title: 'Unsafe', url: 'javascript:alert(1)' }, { title: 'Report', url: '/home/owner/report.pdf' }],
   };
 }
 
@@ -85,7 +85,7 @@ before(async () => {
       ], before: 'older-cursor' }));
   });
   forjaOrigin = await listen(forja);
-  fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ listen: { host: '127.0.0.1', port: Number(new URL(forjaOrigin).port) }, auth: { mode: 'none' } }));
+  fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ publicUrl: 'https://board.example.com', listen: { host: '127.0.0.1', port: Number(new URL(forjaOrigin).port) }, auth: { mode: 'none' } }));
   process.env.TOWER_FORJA_CONFIG = path.join(dir, 'config.json');
   process.env.TOWER_FORJA_ORIGIN = forjaOrigin;
   towerServer = createServer(manager as never, token);
@@ -130,7 +130,10 @@ test('exact Forja session yields normalized history, paging and card context', a
   assert.match(first.body.context.summary ?? '', /Full work for exact-session/);
   assert.deepEqual(first.body.context.pending, [{ text: 'Question for exact-session', recommendation: 'Proceed' }]);
   assert.equal(first.body.context.delivery?.url, 'https://example.com/result');
-  assert.deepEqual(first.body.context.links, [{ title: 'Evidence', url: 'https://example.com/evidence' }]);
+  assert.deepEqual(first.body.context.links, [
+    { title: 'Evidence', url: 'https://example.com/evidence' },
+    { title: 'Report', url: 'https://board.example.com/api/cards/exact-session/file?path=%2Fhome%2Fowner%2Freport.pdf' },
+  ]);
   const older = await get('observed', first.body.conversation.before);
   assert.equal(older.body.conversation.items[0]?.id, 'older');
   assert.equal(older.body.conversation.hasMore, false);
