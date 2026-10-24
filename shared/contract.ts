@@ -277,3 +277,21 @@ export type ServerEvent =
   | { type: 'notes'; notes: Note[] }
   | { type: 'rotation'; rotation: RotationState }
   | { type: 'boards'; boards: Board[] };
+
+// Read-only session workspace data. Terminal access keeps its existing control policy.
+export interface SessionWorkspace {
+  conversation: {
+    available: boolean;
+    reason?: string;
+    items: FeedItem[];
+    hasMore: boolean;
+    before?: string;
+  };
+  context: {
+    summary?: string;
+    pending?: { text: string; recommendation?: string }[];
+    delivery?: { text: string; url?: string; at?: string };
+    links?: { title: string; url: string }[];
+  };
+}
+// GET /api/agents/:id/workspace?before=<cursor> -> SessionWorkspace
