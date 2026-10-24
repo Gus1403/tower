@@ -9,7 +9,7 @@ DEST="Code/tower" # relative to the remote $HOME
 
 echo "==> rsync $SRC -> $HOST:~/$DEST"
 ssh -o BatchMode=yes "$HOST" "mkdir -p ~/$DEST"
-rsync -az --delete \
+rsync -az --delete --exclude web/verify/out \
   --exclude node_modules --exclude .git --exclude dist \
   --exclude 'probes/out' --exclude 'probes/work' \
   "$SRC/" "$HOST:$DEST/"
