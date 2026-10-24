@@ -62,8 +62,11 @@ button.f-tool:hover { border-color: var(--border-strong); }
 .md a:hover { text-decoration: underline; }
 
 @media (max-width: 640px) {
-  .panel-row { flex-wrap: wrap; row-gap: 6px; }
-  .panel-row .panel-name { flex: 1 1 100%; order: 10; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .panel-row { flex-wrap: nowrap; gap: 6px; }
+  .panel-row .panel-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .panel-row .spacer { display: none !important; }
+  .panel-row > :not(.panel-name) { flex: none; }
+  .panel-row .btn-sm { padding: 0 8px; }
   .ctrl select { max-width: 140px; }
   .qchip-text { max-width: 200px; }
   .composer .c-interrupt { padding: 0 8px; font-size: 12px; }

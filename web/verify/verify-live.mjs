@@ -156,6 +156,222 @@ try {
   await p.waitForTimeout(800);
   await shot(p, 'live-phone-sheet');
   await pctx.close();
+
+  // ---------- WAVE A ----------
+  console.log('wave A');
+  const H = { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' };
+  const getState = async () => (await fetch(`${BASE}/api/state`, { headers: H })).json();
+  const agentById = async (id) => (await getState()).agents.find((x) => x.id === id);
+  const launched = [];
+  const softFails = [];
+  const soft = async (name, fn) => {
+    try { await fn(); } catch (e) { softFails.push(`${name}: ${e.message}`); console.log(`  ✗ ${name}: ${e.message}`); }
+  };
+  const until = async (fn, ms, step = 2000) => {
+    const t0 = Date.now();
+    while (Date.now() - t0 < ms) { const v = await fn(); if (v) return v; await new Promise((r) => setTimeout(r, step)); }
+    throw new Error(`timeout ${ms}ms`);
+  };
+  const allowAll = async (pg, ms) => {
+    // click Allow on inbox rows until the panel reaches done
+    const t0 = Date.now();
+    while (Date.now() - t0 < ms) {
+      if (await pg.locator('.panel .status-done').count()) return;
+      const b = pg.locator('.inbox-row .perm-actions button.btn-primary').first();
+      if (await b.count()) await b.click().catch(() => {});
+      await pg.waitForTimeout(1000);
+    }
+    throw new Error('not done in time');
+  };
+  const launchUI = async (pg, kind, task, accountPick) => {
+    const before = new Set((await getState()).agents.map((x) => x.id));
+    await pg.locator('.new-btn').click();
+    await pg.waitForSelector('.dialog');
+    await pg.locator('.segmented button', { hasText: kind }).click();
+    if (accountPick) await accountPick(pg);
+    await pg.locator('.dialog textarea').fill(task);
+    await pg.locator('.dialog button', { hasText: 'Launch' }).click();
+    await pg.waitForSelector('.panel', { timeout: 15000 });
+    const id = await until(async () => (await getState()).agents.find((x) => !before.has(x.id) && x.source === 'tower')?.id, 15000, 500);
+    launched.push(id);
+    return id;
+  };
+
+  const wctx = await browser.newContext({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 2 });
+  let wp = await wctx.newPage();
+  wire(wp);
+  await wp.goto(`${BASE}/?token=${TOKEN}`);
+  await wp.waitForSelector('.topbar .cap', { timeout: 15000 });
+
+  // a. accounts
+  await soft('a accounts', async () => {
+    const st = await until(async () => { const s = await getState(); return (s.accounts || []).some((x) => x.kind === 'claude' && x.loggedIn === true) ? s : null; }, 90000, 5000);
+    const acc = st.accounts;
+    const n = (k) => acc.filter((x) => x.kind === k).length;
+    ok(n('claude') >= 10, `≥10 claude accounts (${n('claude')})`);
+    ok(n('codex') >= 3, `≥3 codex accounts (${n('codex')})`);
+    ok(n('devin') === 1, `1 devin account (${n('devin')})`);
+    ok(acc.every((x) => !/@/.test(`${x.id} ${x.label} ${x.detail ?? ''}`)), 'no emails in account ids/labels/details');
+    ok(acc.some((x) => x.kind === 'claude' && x.loggedIn === true), 'a claude account is loggedIn');
+    await wp.locator('.caps button.cap').first().click();
+    await wp.waitForSelector('.acc-line', { timeout: 5000 });
+    ok((await wp.locator('.acc-line').count()) >= 10, `Accounts panel lists ${await wp.locator('.acc-line').count()} rows`);
+    await shot(wp, 'livea-accounts');
+    await wp.keyboard.press('Escape');
+    await wp.waitForTimeout(300);
+    if (await wp.locator('.acc-line').count()) await wp.mouse.click(5, 450);
+    await shot(wp, 'livea-topbar');
+  });
+
+  // b + c. devin with queue and controls
+  let devinId;
+  await soft('b queue', async () => {
+    devinId = await launchUI(wp, 'Devin', 'Write a file plan.md with a 5-step plan for a todo app using a shell command, then reply DONE.');
+    await until(async () => ['working', 'needs_you'].includes((await agentById(devinId))?.status), 60000, 500);
+    await wp.locator('.panel .composer textarea').fill('Also add a step about testing.');
+    await wp.locator('.panel .composer textarea').press('Enter');
+    await wp.waitForSelector('.panel .qchip', { timeout: 10000 });
+    ok(true, 'queued chip appeared');
+    await shot(wp, 'livea-queued');
+    const t0 = Date.now();
+    // approve until the queued prompt is sent (user bubble count 2) and agent done
+    await until(async () => {
+      const b = wp.locator('.inbox-row .perm-actions button.btn-primary').first();
+      if (await b.count()) await b.click().catch(() => {});
+      const a = await agentById(devinId);
+      return a?.status === 'done' && !(a.queued?.length) && (await wp.locator('.panel .f-user').count()) >= 2;
+    }, 240000, 1500);
+    ok(true, `queued prompt sent and agent done (${Math.round((Date.now() - t0) / 1000)}s)`);
+    await shot(wp, 'livea-queue-final');
+  });
+  await soft('c controls', async () => {
+    const a = await agentById(devinId);
+    const mode = wp.locator('.panel select[aria-label="Mode"]');
+    ok(await mode.count() === 1, 'mode select exists');
+    const opts = await mode.locator('option').evaluateAll((os) => os.map((o) => o.value));
+    ok(opts.length >= 2, `mode lists ${opts.length} modes`);
+    const target = opts.find((v) => v !== a.mode);
+    await mode.selectOption(target);
+    await until(async () => (await agentById(devinId))?.mode === target, 15000, 500);
+    ok(true, `mode changed to ${target} (summary.mode)`);
+    ok((await wp.locator('.panel .ctrl select').count()) >= 2, 'a config select exists besides mode');
+    const st = await agentById(devinId);
+    ok(!!st.usage, 'summary.usage present');
+    ok(/\d+% context/.test(await wp.locator('.panel .ctx-label').innerText()), 'context bar shows %');
+    await wp.locator('.panel button.f-tool').first().click();
+    await wp.waitForSelector('.panel .f-tool-out', { timeout: 5000 });
+    ok(true, 'tool call expands with output');
+    await shot(wp, 'livea-controls');
+  });
+
+  // d. claude on a specific account
+  await soft('d claude account', async () => {
+    const st = await getState();
+    const acct = st.accounts.find((x) => x.kind === 'claude' && x.loggedIn === true);
+    const id = await launchUI(wp, 'Claude', 'Reply with the word PONG.', async (pg) => {
+      await pg.locator('.dialog select[aria-label="Account"]').selectOption(acct.id);
+    });
+    await until(async () => (await agentById(id))?.status === 'done', 180000, 1500).catch(async (e) => { await allowAll(wp, 1000).catch(() => {}); throw e; });
+    ok((await agentById(id)).accountId === acct.id, `summary.accountId === chosen (${acct.id})`);
+    await shot(wp, 'livea-claude-pong');
+  });
+
+  // e. interrupt
+  let intId;
+  await soft('e interrupt', async () => {
+    intId = await launchUI(wp, 'Devin', 'Count from 1 to 200 in a shell loop with sleep 0.2 between numbers, then reply DONE.');
+    await until(async () => {
+      const b = wp.locator('.inbox-row .perm-actions button.btn-primary').first();
+      if (await b.count()) await b.click().catch(() => {});
+      const a = await agentById(intId);
+      return a?.status === 'working' && (await wp.locator('.panel .b-interrupt').count()) > 0 && (await wp.locator('.inbox-row').count()) === 0;
+    }, 120000, 1000);
+    await wp.waitForTimeout(3000);
+    await wp.locator('.panel .b-interrupt').click();
+    const a = await until(async () => { const x = await agentById(intId); return x?.status === 'done' ? x : null; }, 30000, 500);
+    ok(a.stopReason === 'cancelled', `interrupt -> done stopReason=${a.stopReason}`);
+    await shot(wp, 'livea-interrupted');
+    await wp.locator('.panel .composer textarea').fill('Reply OK');
+    await wp.locator('.panel .composer textarea').press('Enter');
+    await until(async () => { const x = await agentById(intId); return x?.status === 'done' && x.stopReason !== 'cancelled'; }, 120000, 1000);
+    ok(true, 'follow-up after interrupt reached done');
+  });
+
+  // f. persistence + resume
+  await soft('f resume', async () => {
+    const { execSync } = await import('node:child_process');
+    execSync("ssh -o BatchMode=yes eva-forge 'systemctl --user restart tower.service'", { stdio: 'inherit' });
+    await until(async () => { try { return (await fetch(`${BASE}/api/state`, { headers: H })).ok; } catch { return false; } }, 60000, 1000);
+    await wp.close();
+    wp = await wctx.newPage();
+    wire(wp);
+    await wp.goto(`${BASE}/?token=${TOKEN}`);
+    await wp.waitForSelector('.topbar .cap', { timeout: 15000 });
+    const st = await getState();
+    const mine = st.agents.filter((x) => launched.includes(x.id));
+    ok(mine.length === launched.length, `persisted cards present (${mine.length}/${launched.length})`);
+    ok(mine.every((x) => x.status === 'stopped' && x.resumable), 'all persisted cards stopped + resumable');
+    await wp.locator(`.card`, { hasText: (await agentById(devinId)).name }).first().click();
+    await wp.waitForSelector('.panel .composer-resume button', { timeout: 8000 });
+    await shot(wp, 'livea-resume-before');
+    await wp.locator('.panel .composer-resume button', { hasText: 'Resume' }).click();
+    await until(async () => (await agentById(devinId))?.status === 'done', 120000, 1000);
+    ok(true, 'Resume -> done');
+    await wp.locator('.panel .composer textarea').fill('What file did you create?');
+    await wp.locator('.panel .composer textarea').press('Enter');
+    await until(async () => {
+      const b = wp.locator('.inbox-row .perm-actions button.btn-primary').first();
+      if (await b.count()) await b.click().catch(() => {});
+      const a = await agentById(devinId);
+      return a?.status === 'done' && (await wp.locator('.panel .f-user').count()) >= 3;
+    }, 120000, 1500);
+    const last = await wp.locator('.panel .f-agent').last().innerText();
+    ok(/plan\.md/i.test(last), `resumed agent remembers file: "${last.slice(0, 80)}"`);
+    await shot(wp, 'livea-resumed');
+  });
+
+  // g. remove via ⋯
+  await soft('g remove', async () => {
+    const id = intId ?? launched[launched.length - 1];
+    const name = (await agentById(id)).name;
+    await wp.locator('.card', { hasText: name }).first().click();
+    await wp.waitForSelector('.panel');
+    wp.once('dialog', (d) => d.accept());
+    await wp.locator('.panel button[aria-label="More"]').click();
+    await wp.locator('.more-menu button', { hasText: 'Remove card' }).click();
+    await until(async () => !(await agentById(id)), 15000, 500);
+    await wp.waitForTimeout(500);
+    ok((await wp.locator('.card', { hasText: name }).count()) === 0, 'card removed from board and state');
+    launched.splice(launched.indexOf(id), 1);
+  });
+
+  // h. phone
+  await soft('h phone', async () => {
+    const pc = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true });
+    const pp = await pc.newPage();
+    wire(pp);
+    await pp.goto(`${BASE}/?token=${TOKEN}`);
+    await pp.waitForSelector('.tabs', { timeout: 15000 });
+    await pp.waitForTimeout(1000);
+    ok(await pp.evaluate(() => document.documentElement.scrollWidth <= 390), 'phone board no horizontal overflow');
+    await shot(pp, 'livea-phone-board');
+    await pp.locator('.tab', { hasText: 'Done' }).click();
+    await pp.locator('.board .card:visible').first().click();
+    await pp.waitForSelector('.panel', { timeout: 8000 });
+    await pp.waitForTimeout(600);
+    const box = await pp.locator('.panel .panel-row').boundingBox();
+    const x = await pp.locator('.panel button[aria-label="Close"]').boundingBox();
+    ok(x.y < box.y + 40, 'close ✕ on first header line');
+    ok(await pp.evaluate(() => document.documentElement.scrollWidth <= 390), 'phone sheet no horizontal overflow');
+    await shot(pp, 'livea-phone-sheet');
+    await pc.close();
+  });
+
+  // cleanup: remove every agent launched here
+  for (const id of launched) await fetch(`${BASE}/api/agents/${id}`, { method: 'DELETE', headers: H }).catch(() => {});
+  await wctx.close();
+  console.log(`wave A soft failures: ${softFails.length}`, softFails);
+  if (softFails.length) process.exitCode = 1;
 } finally {
   await browser.close();
 }
@@ -163,5 +379,5 @@ try {
 console.log(`checks passed: ${checks}`);
 console.log(`console errors: ${errors.length}`, errors);
 console.log(`failed requests: ${failed.length}`, failed);
-if (errors.length || failed.length) process.exit(1);
+if (errors.length || failed.length || process.exitCode) process.exit(1);
 console.log('VERIFY LIVE OK');
