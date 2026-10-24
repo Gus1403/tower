@@ -359,10 +359,13 @@ export const AgentCard = memo(function AgentCard({ a, selected }: { a: AgentSumm
   const done = a.plan ? a.plan.filter((p) => p.status === 'completed').length : 0;
   return (
     <button className={`card card-${a.status} ${selected ? 'selected' : ''}`} onClick={() => openAgent(a.id)}>
-      <div className="card-top">
-        <span className={`dot dot-${a.status}`} title={STATUS_LABEL[a.status]} aria-label={STATUS_LABEL[a.status]} />
-        <span className="card-name">{a.name}</span>
-      </div>
+      {/* one source of truth: the default name is the task's first words, so show it only when it says something new */}
+      {a.task.startsWith(a.name) ? null : (
+        <div className="card-top">
+          <span className={`dot dot-${a.status}`} title={STATUS_LABEL[a.status]} aria-label={STATUS_LABEL[a.status]} />
+          <span className="card-name">{a.name}</span>
+        </div>
+      )}
       <div className="card-task">{a.task}</div>
       <div className={`card-msg card-st-${a.status}`}>{statusLine(a)}</div>
       {a.status === 'error' && a.error && <div className="card-err">{a.error}</div>}

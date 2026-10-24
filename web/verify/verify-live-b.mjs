@@ -100,8 +100,13 @@ const launchUI = async (kind, task, accountId) => {
   await wp.locator('.new-btn').click();
   await wp.waitForSelector('.dialog');
   await wp.locator('.segmented button', { hasText: kind }).click();
-  if (accountId) await wp.locator('.dialog select[aria-label="Account"]').selectOption(accountId);
-  await wp.locator('.dialog textarea').fill(task);
+  // UI simplification: Account select now lives inside the collapsed `details.na-advanced`; open it first.
+  if (accountId) {
+    await wp.locator('.dialog details.na-advanced > summary').click();
+    await wp.locator('.dialog select[aria-label="Account"]').selectOption(accountId);
+  }
+  // UI simplification: the task textarea is labeled "Task"; target it explicitly.
+  await wp.locator('.dialog textarea[aria-label="Task"]').fill(task);
   await wp.locator('.dialog button', { hasText: 'Launch' }).click();
   await wp.waitForSelector('.panel', { timeout: 15000 });
   const id = await until(async () => (await getState()).agents.find((x) => !before.has(x.id) && x.source === 'tower')?.id, 15000, 500);
@@ -130,7 +135,8 @@ try {
   await soft('1 https', async () => {
     ok(BASE.startsWith('https://'), `base is https (${BASE})`);
     await wp.goto(`${BASE}/?token=${TOKEN}`);
-    await wp.waitForSelector('.topbar .cap', { timeout: 20000 });
+    // UI simplification: per-kind capacity chips (`.topbar .cap`) replaced by one `button.accounts-btn`.
+    await wp.waitForSelector('.topbar button.accounts-btn', { timeout: 20000 });
     await wp.waitForTimeout(1500);
     ok(wp.url().startsWith('https://'), 'page loaded over https');
     ok(!wp.url().includes('token='), 'token stripped from the address bar');
@@ -196,12 +202,13 @@ try {
     await openCard(qId);
     await until(async () => {
       await approve();
-      return (await wp.locator('.qinbox .q-row').count()) > 0;
+      // UI simplification: questions render inside the single `.inbox` section (was `.qinbox`).
+      return (await wp.locator('.inbox .q-row').count()) > 0;
     }, 240000, 1500);
     const a = await agentById(qId);
     ok(a.status === 'needs_you' && a.questions?.length === 1, `summary: status needs_you + 1 open question (${a.status})`);
     ok(a.questions[0].recommendation === 'Blue', 'question carries recommendation "Blue"');
-    const row = wp.locator('.qinbox .q-row').first();
+    const row = wp.locator('.inbox .q-row').first(); // was `.qinbox` (UI simplification)
     ok(/Which color should the main button be\?/.test(await row.locator('.q-text').innerText()), 'q-row shows the question text');
     ok(/Blue/.test(await row.locator('.q-rec').innerText()), 'q-row shows the recommendation');
     await shot(wp, 'question-inbox');
@@ -217,7 +224,7 @@ try {
       const noOverflow = () => pp.evaluate(() => document.documentElement.scrollWidth <= 390);
       ok(await noOverflow(), 'phone board: no horizontal overflow');
       await shot(pp, 'phone-board');
-      const pq = pp.locator('.qinbox .q-row').first();
+      const pq = pp.locator('.inbox .q-row').first(); // was `.qinbox` (UI simplification)
       ok(await pq.isVisible(), 'phone: Questions inbox row visible');
       await pq.scrollIntoViewIfNeeded();
       await shot(pp, 'phone-question');
@@ -232,9 +239,10 @@ try {
       phoneDone = true;
     });
 
+    // UI simplification: "Use recommendation" (fill, then Answer) became "Send recommendation", which sends directly.
+    // The behavior check is kept end-to-end below: the question closes and the agent receives "[Answer to «…»] Blue".
+    ok(/Send recommendation/.test(await row.locator('.q-use').innerText()), '"Send recommendation" button present');
     await row.locator('.q-use').click();
-    ok((await row.locator('.q-input').inputValue()) === 'Blue', '"Use recommendation" fills Blue');
-    await row.locator('.q-send').click();
     await until(async () => !((await agentById(qId))?.questions?.length), 10000, 500);
     ok(true, 'question removed after answering');
     await waitDone(qId, 240000);
@@ -320,7 +328,7 @@ try {
     ok(!n || n.archived, `note archived/removed from Notes (${n ? 'archived' : 'removed'})`);
     await wp.keyboard.press('Escape');
     await wp.waitForTimeout(300);
-    ok((await wp.locator(`.col-notes .note[data-note-id="${noteId}"]`).count()) === 0, 'note no longer shown in the Notes column');
+    ok((await wp.locator(`.col-notes .note[data-note-id="${noteId}"]`).count()) === 0, 'note no longer shown in the To do column' /* column renamed Notes -> To do */);
     await openCard(noteAgentId);
     await shot(wp, 'note-agent-done');
   });
