@@ -224,7 +224,7 @@ export interface StateResponse {
 // POST /api/rotation                      body { autoRotate: boolean } -> 200 RotationState
 // WS { type: 'rotation'; rotation: RotationState } on every change; accounts changes still go out as 'accounts'.
 // ---- Wave D (boards + sessions talking to each other) ----
-// Default boards: programs { Working: starting|working|stuck, Needs you: needs_you, Done: done|stopped|error } and
+// Default boards: programs { Working: needs_you|stuck|starting|working (needs_you pinned first), Done: done|stopped|error } and
 //      customers { Handling: starting|working|needs_you|stuck, Waiting on the customer: done, Asleep: stopped|error }.
 // POST /api/boards { name, columns? } -> 201 Board (columns default to the programs set) · DELETE /api/boards/:id (empty only)
 // POST /api/agents/:id/board { board, customer? } -> 200 (moves a card between boards)

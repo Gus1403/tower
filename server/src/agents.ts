@@ -39,8 +39,7 @@ export const DEFAULT_BOARDS: Board[] = [
     id: 'programs',
     name: 'Programs',
     columns: [
-      { id: 'working', name: 'Working', statuses: ['starting', 'working', 'stuck'] },
-      { id: 'needs-you', name: 'Needs you', statuses: ['needs_you'] },
+      { id: 'working', name: 'Working', statuses: ['needs_you', 'stuck', 'starting', 'working'] },
       { id: 'done', name: 'Done', statuses: ['done', 'stopped', 'error'] },
     ],
   },
