@@ -19,10 +19,16 @@ Touches: server/src/agents.ts, server/test/waved.test.ts, docs/plan-fleet-recove
 
 ## Acceptance
 
-- [ ] Regression proves unrelated display titles map by exact session, preserving full work and routine/customer board/state.
-- [ ] Missing/malformed Forja state falls back to discovered tmux sessions; demo redaction still hides names/work.
-- [ ] Full server tests and frontend build pass.
-- [ ] Deployed API matches actual Forja identities; every discovered screen returns text.
-- [ ] Desktop and phone screenshots inspected; named cards open live screens without browser errors.
+- [x] Regression proves unrelated display titles map by exact session, preserving full work and routine/customer board/state.
+- [x] Missing/malformed Forja state falls back to discovered tmux sessions; demo redaction still hides names/work.
+- [x] Full server tests and frontend build pass.
+- [x] Deployed API matches actual Forja identities; every discovered screen returns text.
+- [x] Desktop and phone screenshots inspected; named cards open live screens without browser errors.
 
 Scope limits: existing running tmux fleet only; sleeping customer sessions without a process are not silently started. No customer messages, provider subscription changes, or hackathon submission. ACP-owned agents retain their existing controls; legacy fleet sessions use their actual terminal.
+
+## Evidence
+
+Deployed identity repair: 50 discovered sessions, 50 interactive screens returning text, zero mismatches against live board names/boards/states. Server suite 40/40; frontend build and server typecheck pass. Desktop and phone in light/dark render without overflow or console errors. Screenshot capture now waits for the panel entrance animation to finish; the apparent phone transparency was an intermediate animation frame, not a persistent defect.
+
+Local evidence: `/tmp/devin-takeover/live-summary.json`, `comparison.json`, `browser-results.json`, `tests-final.log`, `build.log`. Screenshots contain private fleet text and are not committed. Session-workspace redesign follows in a separate plan.
